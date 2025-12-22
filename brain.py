@@ -40,7 +40,7 @@ def main() -> None:
     else:
         print("    Sudo: No usable sudo privileges")
 
-       cron_info = state.get("cron", {})
+    cron_info = state.get("cron", {})
 
     if not cron_info:
         print("    Cron: No data")
