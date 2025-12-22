@@ -1,55 +1,83 @@
-import os
-import platform
+# nullpeas/probes/env_probe.py
+
 import socket
-import subprocess
+import platform
+from pathlib import Path
 from typing import Dict, Any
 
+from nullpeas.core.exec import run_command
 
-def run(state: Dict[str, Any]) -> None:
-    """
-    Collect basic environment information:
-    - hostname
-    - OS / distribution info (best-effort)
-    - kernel version
-    """
 
+def _parse_os_release(path: Path = Path("/etc/os-release")) -> Dict[str, Any]:
+    """
+    Parse /etc/os-release into a dict of lowercased keys.
+    Falls back gracefully on errors.
+    """
+    data: Dict[str, Any] = {}
+
+    if not path.exists():
+        return data
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip().lower()
+                val = val.strip().strip('"').strip("'")
+                data[key] = val
+    except Exception as e:
+        # Don’t break the probe, just record the error
+        data["_error"] = str(e)
+
+    return data
+
+
+def run(state: dict):
     env: Dict[str, Any] = {}
 
-    # Hostname
+    # Basic host / platform info
     try:
         env["hostname"] = socket.gethostname()
     except Exception as e:
         env["hostname_error"] = str(e)
 
-    # Platform / OS info
     try:
         env["platform_system"] = platform.system()
         env["platform_release"] = platform.release()
         env["platform_version"] = platform.version()
+        env["architecture"] = platform.machine()
     except Exception as e:
         env["platform_error"] = str(e)
 
-    # uname -a (raw)
-    try:
-        result = subprocess.run(
-            ["uname", "-a"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        env["raw_uname"] = result.stdout.strip()
-    except Exception as e:
-        env["raw_uname_error"] = str(e)
+    # Raw uname (via central exec helper)
+    uname_res = run_command(["uname", "-a"], timeout=3)
+    if uname_res["ok"] or uname_res["stdout"]:
+        env["raw_uname"] = uname_res["stdout"]
+    else:
+        env["raw_uname_error"] = uname_res["error"] or uname_res["stderr"]
 
-    # Optional: distro info (Linux only, best-effort)
-    try:
-        if env.get("platform_system") == "Linux":
-            # This might not exist on all systems, so fail soft
-            if os.path.exists("/etc/os-release"):
-                with open("/etc/os-release", "r", encoding="utf-8") as f:
-                    env["os_release"] = f.read()
-    except Exception as e:
-        env["os_release_error"] = str(e)
+    # Separate kernel info (even though it's also in uname/platform)
+    uname_r_res = run_command(["uname", "-r"], timeout=3)
+    if uname_r_res["ok"] or uname_r_res["stdout"]:
+        env["kernel_release"] = uname_r_res["stdout"]
 
-    # Write into state
+    # Parse /etc/os-release into structured fields
+    os_release = _parse_os_release()
+    if os_release:
+        env["os_release"] = os_release
+
+        # Convenience shortcuts for modules later
+        env["os_id"] = os_release.get("id")
+        env["os_version_id"] = os_release.get("version_id")
+        env["os_pretty_name"] = os_release.get("pretty_name")
+
+    # Simple flags that will be handy for triggers/modules
+    system_lower = env.get("platform_system", "").lower()
+    env["is_linux"] = (system_lower == "linux")
+    env["is_bsd_like"] = system_lower in {"freebsd", "openbsd", "netbsd"}
+    env["is_macos"] = system_lower == "darwin"
+
     state["env"] = env
