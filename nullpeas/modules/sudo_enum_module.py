@@ -178,6 +178,12 @@ def _severity_for_rule(
     return "low"
 
 
+
+@register_module(
+    key="sudo_enum",
+    description="Analyse sudo -l output and GTFOBins-style candidates",
+    required_triggers=["sudo_privesc_surface"],
+)
 def run(state: dict, report: Report):
     """
     Medium-level sudo analysis module.
