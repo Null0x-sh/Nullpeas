@@ -34,9 +34,9 @@ Design philosophy
 - Open - built to be extended by the community
 
 How to run
--Clone the repo and
--chmod +x brain.py
--./brain.py
+- Clone the repo and
+- chmod +x brain.py
+- ./brain.py
 
 Output example ( when run in github codespace )
 - Probe completed
