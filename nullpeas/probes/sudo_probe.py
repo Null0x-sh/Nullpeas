@@ -1,77 +1,85 @@
-import subprocess
-from typing import Dict, Any
+from nullpeas.core.exec import run_command
 
 
-def run(state: Dict[str, Any]) -> None:
-    """
-    Sudo Probe
-    ----------
-    Purpose:
-        Collect information about sudo privileges safely without blocking,
-        and store raw + basic interpreted results in state["sudo"].
+def run(state: dict):
+    sudo_info = {
+        "binary_present": False,
+        "return_code": None,
+        "raw_stdout": "",
+        "raw_stderr": "",
 
-    What this DOES right now:
-        - Runs `sudo -n -l` (non-interactive, so it won't hang for password input)
-        - Captures return code, stdout, stderr
-        - Identifies whether sudo EXISTS and responds
-        - Identifies basic situations like "needs password" or "no sudo access"
-        - Stores results in state for later analysis modules
+        # High-level interpretation
+        "denied_completely": False,
+        "rules_listed": False,
+        "has_nopasswd_rule": False,
 
-    What it DOES NOT do yet (by design at this stage):
-        - Deep parse sudo rules
-        - Detect specific exploitable sudo configs
-        - Perform GTFOBins matching
-        - Handle multi-language sudo output robustly
-        - Handle ALL weird sudo edge cases
+        # Final interpretation flags
+        "has_sudo_rules": False,
+        "passwordless_possible": False,
 
-    Those will be handled later in a dedicated sudo analysis module.
-    """
+        # Errors
+        "error": None,
+    }
 
-    sudo: Dict[str, Any] = {}
+    # Use centralised runner
+    res = run_command(["sudo", "-n", "-l"], timeout=5)
 
-    # -n = non-interactive mode
-    # If sudo requires a password, it fails immediately instead of hanging.
-    command = ["sudo", "-n", "-l"]
+    # If the binary is missing entirely
+    if res["binary_missing"]:
+        sudo_info["error"] = res["error"] or "sudo binary not found on system"
+        state["sudo"] = sudo_info
+        return
 
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=5  # safety timeout so nothing can block execution
-        )
+    # Any unexpected error or timeout
+    if res["timed_out"]:
+        sudo_info["error"] = "sudo -l timed out after 5 seconds"
+        state["sudo"] = sudo_info
+        return
 
-        sudo["return_code"] = result.returncode
-        sudo["stdout"] = result.stdout.strip()
-        sudo["stderr"] = result.stderr.strip()
+    if res["error"] and not res["ok"]:
+        # Some non-timeout, non-binary-missing error
+        sudo_info["error"] = res["error"]
+        # Still store raw output in case it's useful
+        sudo_info["raw_stdout"] = res["stdout"]
+        sudo_info["raw_stderr"] = res["stderr"]
+        sudo_info["return_code"] = res["return_code"]
+        state["sudo"] = sudo_info
+        return
 
-        # Basic interpretation flags
-        output_combined = (result.stdout + result.stderr).lower()
+    # At this point we know the binary exists
+    sudo_info["binary_present"] = True
+    sudo_info["return_code"] = res["return_code"]
+    sudo_info["raw_stdout"] = res["stdout"]
+    sudo_info["raw_stderr"] = res["stderr"]
 
-        # Did sudo respond at all?
-        sudo["sudo_available"] = "usage:" not in output_combined
+    stdout = res["stdout"]
+    stderr = res["stderr"]
+    combined = (stdout + "\n" + stderr).lower()
 
-        # Did it immediately deny?
-        sudo["permission_denied"] = "may not run sudo" in output_combined
+    # --- Hard denials
+    if "may not run sudo" in combined or "not allowed to run sudo" in combined:
+        sudo_info["denied_completely"] = True
 
-        # Did it require a password?
-        sudo["needs_password"] = "a password is required" in output_combined
+    # --- Detect any listed rules
+    # Typical sudo lists rules like:
+    #   (root) NOPASSWD: /usr/bin/vim
+    #   (ALL : ALL) ALL
+    for line in stdout.splitlines():
+        line_strip = line.strip()
+        if line_strip.startswith("(") and ")" in line_strip:
+            sudo_info["rules_listed"] = True
 
-        # VERY primitive indicator - I will replace this later with real parsing
-        sudo["potential_rules_present"] = "command" in output_combined or "may run" in output_combined
+            if "nopasswd" in line_strip.lower():
+                sudo_info["has_nopasswd_rule"] = True
 
-        # High-level state flag for now
-        sudo["has_sudo"] = (
-            sudo["potential_rules_present"]
-            and not sudo["permission_denied"]
-        )
+    # --- Final computed meaning
+    sudo_info["has_sudo_rules"] = (
+        sudo_info["binary_present"]
+        and sudo_info["rules_listed"]
+        and not sudo_info["denied_completely"]
+    )
 
-    except subprocess.TimeoutExpired:
-        sudo["error"] = "sudo -l timed out after 5s"
-    except FileNotFoundError:
-        sudo["error"] = "sudo command not found on system"
-    except Exception as e:
-        sudo["error"] = str(e)
+    sudo_info["passwordless_possible"] = sudo_info["has_nopasswd_rule"]
 
-    # Attach to global runtime state
-    state["sudo"] = sudo
+    state["sudo"] = sudo_info
+
