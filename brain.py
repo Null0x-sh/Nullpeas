@@ -43,12 +43,12 @@ def main() -> None:
        cron_info = state.get("cron", {})
 
     if not cron_info:
-            print("    Cron: No data")
+        print("    Cron: No data")
+    else:
+        if cron_info.get("potential_risk"):
+            print("    Cron: Potentially abusable cron surfaces detected (basic check)")
         else:
-            if cron_info.get("potential_risk"):
-                print("    Cron: Potentially abusable cron surfaces detected (basic check)")
-            else:
-                print("    Cron: No obvious writable cron entries found (basic check only)")
+            print("    Cron: No obvious writable cron entries found (basic check only)")
 
 
 
