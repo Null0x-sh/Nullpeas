@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "state": {
+    "user": {
+      "name": "codespace",
+      "uid": 1000,
+      "groups": [
+        "codespace",
+        "docker",
+        "pipx",
+        "python",
+        "oryx",
+        "golang",
+        "sdkman",
+        "rvm",
+        "php",
+        "conda",
+        "nvs",
+        "nvm",
+        "hugo",
+        "ssh"
+      ],
+      "raw_id_output": "uid=1000(codespace) gid=1000(codespace) groups=1000(codespace),103(docker),986(pipx),987(python),988(oryx),989(golang),990(sdkman),991(rvm),992(php),993(conda),994(nvs),995(nvm),996(hugo),1001(ssh)"
+    }
+  }
+}
