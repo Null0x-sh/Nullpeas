@@ -40,15 +40,15 @@ def main() -> None:
     else:
         print("    Sudo: No usable sudo privileges")
 
-   cron_info = state.get("cron", {})
+       cron_info = state.get("cron", {})
 
     if not cron_info:
-        print("    Cron: No data")
-    else:
-        if cron_info.get("potential_risk"):
-            print("    Cron: Potentially abusable cron surfaces detected (basic check)")
+            print("    Cron: No data")
         else:
-            print("    Cron: No obvious writable cron entries found (basic check only)")
+            if cron_info.get("potential_risk"):
+                print("    Cron: Potentially abusable cron surfaces detected (basic check)")
+            else:
+                print("    Cron: No obvious writable cron entries found (basic check only)")
 
 
 
