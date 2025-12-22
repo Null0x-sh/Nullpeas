@@ -17,6 +17,7 @@ from nullpeas.probes.users_groups_probe import run as run_users_groups_probe
 from nullpeas.probes.env_probe import run as run_env_probe
 from nullpeas.probes.sudo_probe import run as run_sudo_probe
 from nullpeas.probes.cron_probe import run as run_cron_probe
+from nullpeas.probes.runtime_probe import run as run_runtime_probe
 
 
 def _run_probe_isolated(name, func):
@@ -49,6 +50,7 @@ def _run_all_probes_threaded() -> dict:
         ("env",          run_env_probe),
         ("sudo",         run_sudo_probe),
         ("cron",         run_cron_probe),
+        ("runtime",      run_runtime_probe),
     ]
 
     with ThreadPoolExecutor(max_workers=len(probes)) as executor:
@@ -89,6 +91,7 @@ def _print_summary(state: dict):
     env = state.get("env", {})
     sudo = state.get("sudo", {})
     cron = state.get("cron", {})
+    runtime = state.get("runtime", {})
 
     # User summary
     print("=== User ===")
@@ -127,6 +130,28 @@ def _print_summary(state: dict):
     user_cron = cron.get("user_crontab", {})
     print(f"  User crontab     : {user_cron.get('status', 'unknown')}")
     print()
+
+    # Runtime summary
+    print("=== Runtime ===")
+    container = runtime.get("container", {})
+    virt = runtime.get("virtualization", {})
+    docker = runtime.get("docker", {})
+
+    print(f"  In container   : {container.get('in_container')}")
+    print(f"  Container type : {container.get('container_type')}")
+    print(f"  Virt type      : {virt.get('type')}")
+    print(f"  Virt is_vm     : {virt.get('is_vm')}")
+    print(f"  Docker present : {docker.get('binary_present')}")
+    print(f"  Docker socket  : {'exists' if docker.get('socket_exists') else 'missing'}")
+    print()
+
+    # Probe-level errors (if any)
+    probe_errors = state.get("probe_errors", {})
+    if probe_errors:
+        print("=== Probe Errors ===")
+        for name, err in probe_errors.items():
+            print(f"  {name}: {err}")
+        print()
 
     # Probe-level errors (if any)
     probe_errors = state.get("probe_errors", {})
