@@ -1,68 +1,64 @@
 import os
 import pwd
-import subprocess
-from typing import Dict, Any
+import grp
+from typing import Dict, Any, List
 
-# 1) Run 'id -a' and capture raw output
-def run(state: Dict[str, Any]) -> None: 
-   """
-   Collect current user info:
-   - UID (via os.getuid())
-   - Username (via pwd.getpwuid())
-   - Groups (parsed from 'id -a' command output)
-   """
 
-   # Run 'id -a' command and capture raw output
-   try:
-      result = subprocess.run(
-         ["id", "-a"],
-         capture_output=True,
-         text=True,
-         check=True # Raises CalledProcessError on non-zero exit status
-      )
-      raw_output = result.stdout.strip()
-   except Exception as e:
-      state["user"] = {
-         "error": f"Failed to run 'id -a': {str(e)}"
-      }
-      return
-   
-   # 2) Get UID and username from stdlib (this is more reliable)
-   try:
-      uid = os.getuid()
-      name = pwd.getpwuid(uid).pw_name
-   except Exception as e:
-      uid = None
-      name = "unknown"
-
-   groups: list[str] = []
-   
-   try:
-    parts = raw_output.split()
-    groups_part = [p for p in parts if p.startswith("groups=")]
-    groups_part = groups_part[0] if groups_part else ""
-    if groups_part:
-       raw_groups = groups_part.split("=", 1)[1]
-       for entry in raw_groups.split(","):
-          if "(" in entry and ")" in entry:
-             groups.append(entry.split("(")[1].split(")")[0])
-    
-   except Exception as e:
-    state["user"] = {
-       "name": name,
-       "uid": uid,
-       "groups": groups,
-       "raw_id_output": raw_output,
-       "parse_error": str(e),    
+def run(state: dict):
+    user_info: Dict[str, Any] = {
+        "name": None,
+        "uid": None,
+        "gid": None,
+        "home": None,
+        "shell": None,
+        "groups": [],
+        "is_root": False,
+        "in_sudo_group": False,
+        "in_wheel_group": False,
+        "in_docker_group": False,
+        "in_lxd_group": False,
+        "error": None,
     }
-    return
-   
-   state["user"] = {
-      "name": name,
-      "uid": uid,
-      "groups": groups,
-      "raw_id_output": raw_output,
-   }
 
-            
-    
+    try:
+        uid = os.getuid()
+        user_info["uid"] = uid
+
+        pw = pwd.getpwuid(uid)
+        user_info["name"] = pw.pw_name
+        user_info["gid"] = pw.pw_gid
+        user_info["home"] = pw.pw_dir
+        user_info["shell"] = pw.pw_shell
+
+        # Collect group memberships
+        group_ids: List[int] = os.getgroups()
+        groups: List[Dict[str, Any]] = []
+
+        for gid in group_ids:
+            try:
+                gr = grp.getgrgid(gid)
+                groups.append({
+                    "name": gr.gr_name,
+                    "gid": gr.gr_gid,
+                })
+            except KeyError:
+                groups.append({
+                    "name": None,
+                    "gid": gid,
+                })
+
+        user_info["groups"] = groups
+
+        # Convenience flags for triggers/modules
+        user_info["is_root"] = (uid == 0)
+
+        group_names = {g["name"] for g in groups if g["name"]}
+        user_info["in_sudo_group"] = "sudo" in group_names
+        user_info["in_wheel_group"] = "wheel" in group_names
+        user_info["in_docker_group"] = "docker" in group_names
+        user_info["in_lxd_group"] = "lxd" in group_names
+
+    except Exception as e:
+        user_info["error"] = str(e)
+
+    state["user"] = user_info
