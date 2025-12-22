@@ -21,7 +21,8 @@ from nullpeas.probes.sudo_probe import run as run_sudo_probe
 from nullpeas.probes.cron_probe import run as run_cron_probe
 from nullpeas.probes.runtime_probe import run as run_runtime_probe
 
-from nullpeas.modules.sudo_enum_module import run as run_sudo_enum_module
+from nullpeas.modules import get_available_modules
+
 
 
 # ========================= Probes =========================
@@ -250,22 +251,24 @@ def _print_suggestions(state: dict):
 # ========================= Interactive Modules =========================
 
 def _interactive_modules(state: dict, report: Report):
+    """
+    Simple interactive CLI:
+    - Ask the registry which modules are applicable based on triggers
+    - Let the operator pick one
+    - Run it and append to the report
+    """
     triggers = state.get("triggers", {}) or {}
 
     if triggers.get("is_root"):
         return
 
-    options = []
-
-    if triggers.get("sudo_privesc_surface"):
-        options.append(("sudo_enum", "Analyse sudo -l and GTFOBins correlation", run_sudo_enum_module))
-
-    if not options:
+    modules = get_available_modules(triggers)
+    if not modules:
         return
 
     print("=== Modules ===")
-    for idx, (key, desc, _) in enumerate(options, start=1):
-        print(f"  {idx}) {key} - {desc}")
+    for idx, mod in enumerate(modules, start=1):
+        print(f"  {idx}) {mod['key']} - {mod['description']}")
     print("  0) Skip")
     print()
 
@@ -276,13 +279,14 @@ def _interactive_modules(state: dict, report: Report):
         return
 
     num = int(choice)
-    if num == 0 or num > len(options):
+    if num == 0 or num > len(modules):
         print("Skipping modules.")
         return
 
-    key, desc, func = options[num - 1]
-    print(f"Running module: {key} - {desc}")
-    func(state, report)
+    mod = modules[num - 1]
+    print(f"Running module: {mod['key']} - {mod['description']}")
+    mod["run"](state, report)
+
 
 
 # ========================= Main =========================
