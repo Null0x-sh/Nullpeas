@@ -47,8 +47,8 @@ def main() -> None:
     else:
         if cron_info.get("user_crontab") and "no user crontab" not in cron_info["user_crontab"].lower():
             print("    Cron: User crontab present")
-    else:
-        print("    Cron: No user crontab")
+        else:
+            print("    Cron: No user crontab")
 
     if cron_info.get("found_files"):
         print("    Cron: System cron entries detected")
