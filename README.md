@@ -1,10 +1,10 @@
 # Nullpeas
 
-**Disclaimer
+**Disclaimer**
 > I am currently transitioning into a cybersecurity career and actively learning offensive security, tooling development and software engineering.
 > Nullpeas is a both a passion project and learning project - expect evolution, iteration, and improvement over time
 > This tool is not being presented as a "professional grade" product (yet).
-> It is an education project built to help me deepen my understanding while hopefully helping others to learn alongside me.** 
+> It is an education project built to help me deepen my understanding while hopefully helping others to learn alongside me. 
 
 Nullpeas is a modular privilege escalation assistant designed to replace the big monolithic script approach used by other tools - while still trying to retain what makes those tools great.
 
