@@ -2,6 +2,8 @@ from typing import Dict, Any, List, Optional
 
 from nullpeas.core.exec import run_command
 from nullpeas.core.report import Report
+from nullpeas.modules import register_module
+
 
 
 # Minimal GTFOBins-style mapping.
