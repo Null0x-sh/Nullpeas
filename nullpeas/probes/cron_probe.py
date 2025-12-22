@@ -1,162 +1,129 @@
 import os
-import stat
-import subprocess
+from pathlib import Path
 from typing import Dict, Any, List
 
+import pwd
+import grp
 
-def safe_read_file(path: str) -> str:
-    """Safely read a file. Returns content or error string."""
+from nullpeas.core.exec import run_command
+
+
+CRON_PATHS = [
+    "/etc/crontab",
+    "/etc/cron.d",
+    "/var/spool/cron",
+    "/var/spool/cron/crontabs",
+    "/etc/cron.daily",
+    "/etc/cron.hourly",
+    "/etc/cron.weekly",
+    "/etc/cron.monthly",
+]
+
+
+def _safe_read_file(path: Path) -> str:
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
             return f.read()
     except Exception as e:
-        return f"[error reading: {e}]"
+        return f"[error reading {path}: {e}]"
 
 
-def is_potentially_abusable(path: str, current_uid: int, current_gid: int) -> Dict[str, Any]:
+def _file_metadata(path: Path) -> Dict[str, Any]:
     """
-    Very lightweight heuristic:
-    - file writable by current user
-    - OR world-writable
-    - OR directory writable where cron jobs live
+    Collect permission / ownership metadata for cron-related files.
+    This is where future modules will look to detect writable cron paths.
     """
-    info: Dict[str, Any] = {
-        "path": path,
-        "writable_by_user": False,
-        "world_writable": False,
-        "writable_by_group": False,
-        "reason": [],
+    meta: Dict[str, Any] = {
+        "path": str(path),
+        "owner": None,
+        "group": None,
+        "mode": None,
+        "size": None,
+        "error": None,
     }
 
     try:
-        st = os.stat(path)
+        st = path.stat()
+        meta["size"] = st.st_size
+        meta["mode"] = f"{st.st_mode & 0o777:04o}"
+
+        try:
+            meta["owner"] = pwd.getpwuid(st.st_uid).pw_name
+        except Exception:
+            meta["owner"] = st.st_uid
+
+        try:
+            meta["group"] = grp.getgrgid(st.st_gid).gr_name
+        except Exception:
+            meta["group"] = st.st_gid
+
     except Exception as e:
-        info["error"] = str(e)
-        return info
+        meta["error"] = str(e)
 
-    mode = st.st_mode
-
-    # user/group/world bits
-    user_w = bool(mode & stat.S_IWUSR)
-    group_w = bool(mode & stat.S_IWGRP)
-    other_w = bool(mode & stat.S_IWOTH)
-
-    same_user = (st.st_uid == current_uid)
-    same_group = (st.st_gid == current_gid)
-
-    if same_user and user_w:
-        info["writable_by_user"] = True
-        info["reason"].append("writable_by_user")
-
-    if same_group and group_w:
-        info["writable_by_group"] = True
-        info["reason"].append("writable_by_group")
-
-    if other_w:
-        info["world_writable"] = True
-        info["reason"].append("world_writable")
-
-    return info
+    return meta
 
 
-def run(state: Dict[str, Any]) -> None:
-    """
-    Cron Probe
-    ----------
-    Purpose:
-        Safely enumerate cron configuration and job locations,
-        and perform a *basic* check for potentially abusable cron surfaces.
+def run(state: dict):
+    cron: Dict[str, Any] = {
+        "paths_checked": CRON_PATHS,
+        "found_files": {},      # Backwards-compatible summary of contents
+        "files_metadata": [],   # New: structured metadata for each discovered file
+        "user_crontab": {},
+        "errors": [],
+    }
 
-    What this DOES:
-        - Collects system + user cron locations
-        - Reads accessible cron files
-        - Captures raw contents
-        - Flags files/dirs that are writable by the current user/group/world
-        - Sets cron["potential_risk"] = True if anything looks suspicious
+    # Enumerate files/directories in CRON_PATHS
+    for raw_path in CRON_PATHS:
+        p = Path(raw_path)
+        if not p.exists():
+            continue
 
-    What it DOES NOT do yet:
-        - Deep analysis of job commands
-        - Confirmed exploitability
-        - Any modification or exploitation
-
-    Deeper logic will live in a future cron abuse / escalation module.
-    """
-
-    cron: Dict[str, Any] = {}
-
-    cron_paths: List[str] = [
-        "/etc/crontab",
-        "/etc/cron.d",
-        "/var/spool/cron",
-        "/var/spool/cron/crontabs",
-        "/etc/cron.daily",
-        "/etc/cron.hourly",
-        "/etc/cron.weekly",
-        "/etc/cron.monthly",
-    ]
-
-    cron["paths_checked"] = cron_paths
-    cron["found_files"] = {}
-    cron["user_crontab"] = ""
-    cron["errors"] = []
-    cron["suspicious_entries"] = []
-    cron["potential_risk"] = False
-
-    current_uid = os.getuid()
-    current_gid = os.getgid()
-
-    # Read paths + check permissions
-    for path in cron_paths:
-        if os.path.isdir(path):
+        if p.is_dir():
             try:
-                files = []
-                for item in os.listdir(path):
-                    full_path = os.path.join(path, item)
-                    if os.path.isfile(full_path):
-                        # Store content
-                        files.append({
-                            "path": full_path,
-                            "content": safe_read_file(full_path)
-                        })
+                entries: List[Dict[str, Any]] = []
+                for entry_name in os.listdir(p):
+                    entry_path = p / entry_name
+                    if not entry_path.is_file():
+                        continue
+                    content = _safe_read_file(entry_path)
+                    entries.append({
+                        "path": str(entry_path),
+                        "content": content,
+                    })
+                    cron["files_metadata"].append(_file_metadata(entry_path))
 
-                        # Check permissions
-                        perm_info = is_potentially_abusable(full_path, current_uid, current_gid)
-                        if perm_info.get("reason"):
-                            cron["suspicious_entries"].append(perm_info)
+                if entries:
+                    cron["found_files"][raw_path] = entries
 
-                cron["found_files"][path] = files
             except Exception as e:
-                cron["errors"].append(f"Failed reading dir {path}: {e}")
+                cron["errors"].append(f"error reading directory {raw_path}: {e}")
 
-        elif os.path.isfile(path):
-            cron["found_files"][path] = safe_read_file(path)
-            perm_info = is_potentially_abusable(path, current_uid, current_gid)
-            if perm_info.get("reason"):
-                cron["suspicious_entries"].append(perm_info)
+        elif p.is_file():
+            content = _safe_read_file(p)
+            cron["found_files"][raw_path] = content
+            cron["files_metadata"].append(_file_metadata(p))
 
-    # Attempt user crontab
-    try:
-        result = subprocess.run(
-            ["crontab", "-l"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
+    # Per-user crontab (via exec helper)
+    user_crontab: Dict[str, Any] = {}
+    res = run_command(["crontab", "-l"], timeout=5)
 
-        if result.returncode == 0:
-            cron["user_crontab"] = result.stdout.strip()
-        else:
-            cron["user_crontab"] = "[no user crontab or not permitted]"
+    if res["binary_missing"]:
+        user_crontab["status"] = "crontab_binary_missing"
+        user_crontab["detail"] = res["error"]
+    elif res["timed_out"]:
+        user_crontab["status"] = "timeout"
+        user_crontab["detail"] = "crontab -l timed out after 5 seconds"
+    elif res["ok"]:
+        user_crontab["status"] = "ok"
+        user_crontab["content"] = res["stdout"]
+    else:
+        # Non-zero return code: often "no crontab for user" or permission denied
+        user_crontab["status"] = "non_zero_exit"
+        user_crontab["return_code"] = res["return_code"]
+        user_crontab["stdout"] = res["stdout"]
+        user_crontab["stderr"] = res["stderr"]
+        if res["error"]:
+            user_crontab["error"] = res["error"]
 
-    except FileNotFoundError:
-        cron["user_crontab"] = "[crontab command not found]"
-    except subprocess.TimeoutExpired:
-        cron["user_crontab"] = "[crontab -l timed out]"
-    except Exception as e:
-        cron["user_crontab"] = f"[error reading user crontab: {e}]"
-
-    # Basic risk flag
-    if cron["suspicious_entries"]:
-        cron["potential_risk"] = True
-
+    cron["user_crontab"] = user_crontab
     state["cron"] = cron
