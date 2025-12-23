@@ -405,3 +405,237 @@ def _sudo_operator_research(
         )
 
     return items
+
+    
+    # ---------------------------------------------------------------------------
+# DOCKER-SPECIFIC GUIDANCE
+# ---------------------------------------------------------------------------
+
+def _build_docker_guidance(context: FindingContext) -> GuidanceResult:
+    """
+    Docker-specific guidance builder.
+
+    Uses:
+      - capabilities (e.g. "platform_control", "container_escape")
+      - risk_categories (e.g. "docker_user_daemon_access", "docker_socket_world_writable")
+      - metadata (e.g. in_container, socket_path)
+    and turns them into human-readable guidance.
+    """
+    caps: Set[str] = context.get("capabilities", set()) or set()
+    risk_categories: Set[str] = context.get("risk_categories", set()) or set()
+    metadata: Dict[str, Any] = context.get("metadata", {}) or {}
+
+    navigation = _docker_navigation_from_capabilities(
+        caps=caps,
+        risk_categories=risk_categories,
+        metadata=metadata,
+    )
+    operator_research = _docker_operator_research(
+        risk_categories=risk_categories,
+        metadata=metadata,
+    )
+    offensive_steps = _docker_offensive_from_risk(
+        risk_categories=risk_categories,
+        metadata=metadata,
+    )
+    defensive_actions = _docker_defensive_from_risk(
+        risk_categories=risk_categories,
+        metadata=metadata,
+    )
+    impact = _docker_impact_from_capabilities(
+        caps=caps,
+        risk_categories=risk_categories,
+        metadata=metadata,
+    )
+
+    # Static reference(s) – safe, non-exploit docs about docker daemon risk.
+    references: List[str] = [
+        "Docker security: daemon attack surface and group membership: https://docs.docker.com/engine/security/",
+    ]
+
+    return {
+        "navigation": navigation,
+        "operator_research": operator_research,
+        "offensive_steps": offensive_steps,
+        "defensive_actions": defensive_actions,
+        "impact": impact,
+        "references": references,
+    }
+
+
+def _docker_navigation_from_capabilities(
+    caps: Set[str],
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    """
+    High-level 'where to look' guidance for docker surfaces.
+    This is navigation in the sense of 'navigate the docker environment',
+    not keystrokes.
+    """
+    lines: List[str] = []
+
+    if "platform_control" in caps:
+        lines.extend(
+            [
+                "Treat access to the Docker daemon as equivalent to broad platform control.",
+                "Enumerate containers, images, and volumes that can be managed through this access.",
+                "Identify which containers are long-lived, privileged, or critical to business operations.",
+            ]
+        )
+
+    if "container_escape" in caps or "docker_socket_in_container" in risk_categories:
+        lines.extend(
+            [
+                "From within this container, confirm whether the Docker socket is reachable.",
+                "Map which host resources (filesystems, devices, networks) can be influenced by starting or modifying containers.",
+                "Pay particular attention to containers that mount host paths or run with elevated privileges.",
+            ]
+        )
+
+    # De-duplicate, preserve order.
+    seen = set()
+    deduped: List[str] = []
+    for line in lines:
+        if line not in seen:
+            seen.add(line)
+            deduped.append(line)
+
+    return deduped
+
+
+def _docker_offensive_from_risk(
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    steps: List[str] = []
+
+    steps.append(
+        "Confirm that the Docker CLI on this host can communicate with a Docker daemon (for example by listing containers or images)."
+    )
+
+    if "docker_user_daemon_access" in risk_categories:
+        steps.append(
+            "From the current user context, treat Docker daemon access as a path to controlling how workloads start, what they mount, and which privileges they receive."
+        )
+
+    if "docker_socket_in_container" in risk_categories:
+        steps.append(
+            "From inside this container, consider Docker daemon access as a potential container escape surface towards the host."
+        )
+
+    if "docker_socket_world_writable" in risk_categories:
+        steps.append(
+            "Evaluate how untrusted users on this host could interact with the Docker socket and what kinds of workloads they could deploy."
+        )
+
+    steps.append(
+        "Within the engagement scope, reason about how control of container workloads (including volumes, devices, and privilege flags) could lead to read/write access over host data, services, or identity material."
+    )
+
+    return steps
+
+
+def _docker_defensive_from_risk(
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    actions: List[str] = []
+
+    if "docker_user_daemon_access" in risk_categories:
+        actions.append(
+            "Treat membership in the 'docker' group or equivalent as a highly privileged role and restrict it to tightly controlled service accounts or administrators."
+        )
+
+    if "docker_socket_world_writable" in risk_categories:
+        actions.append(
+            "Harden permissions on the Docker socket so that only trusted users or groups can access it."
+        )
+
+    if "docker_socket_group_writable" in risk_categories:
+        actions.append(
+            "Review which users belong to the socket's group and ensure it does not contain general-purpose or untrusted accounts."
+        )
+
+    if "docker_socket_in_container" in risk_categories:
+        actions.append(
+            "Avoid bind-mounting the host Docker socket into general-purpose containers. Where unavoidable, constrain those containers heavily and monitor accesses."
+        )
+
+    if "docker_rootless_daemon" in risk_categories:
+        actions.append(
+            "Verify that rootless Docker deployments are configured correctly and understand their remaining privilege boundaries."
+        )
+
+    actions.append(
+        "Log and monitor Docker daemon usage, especially container creation, privileged flags, and host path mounts."
+    )
+
+    actions.append(
+        "Periodically review Docker daemon configuration, plugins, and exposed APIs for alignment with hardening guidance."
+    )
+
+    return actions
+
+
+def _docker_impact_from_capabilities(
+    caps: Set[str],
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    impact: List[str] = []
+
+    if "platform_control" in caps:
+        impact.append(
+            "Ability to control how containers are started, including images, command lines, mounted volumes, and privilege flags."
+        )
+
+    if "container_escape" in caps or "docker_socket_in_container" in risk_categories:
+        impact.append(
+            "Potential to use container management capabilities as a stepping stone from a container into the underlying host."
+        )
+
+    if "file_read" in caps or "file_write" in caps:
+        impact.append(
+            "Ability to influence which host filesystems are mounted into containers, potentially exposing sensitive data or configuration."
+        )
+
+    if not impact:
+        impact.append(
+            "Meaningful elevated operations may be possible depending on how Docker is used and which workloads are managed from this context."
+        )
+
+    return impact
+
+
+def _docker_operator_research(
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    items: List[str] = []
+
+    if "docker_user_daemon_access" in risk_categories:
+        items.extend(
+            [
+                "Map which containers and images are under the control of this Docker daemon and which of them are security-critical.",
+                "Identify any containers that mount host filesystems, expose host device nodes, or run with elevated privileges.",
+            ]
+        )
+
+    if "docker_socket_in_container" in risk_categories:
+        items.extend(
+            [
+                "From within the container, determine what operations against the Docker daemon are possible and what effect they could have on the host.",
+                "Assess whether existing container configurations already provide a path to host data or sensitive services.",
+            ]
+        )
+
+    if "docker_socket_world_writable" in risk_categories or "docker_socket_group_writable" in risk_categories:
+        items.extend(
+            [
+                "Enumerate which users on the host can interact with the Docker socket and what their normal duties are.",
+                "Assess whether any low-privilege or untrusted accounts have practical access to container management operations.",
+            ]
+        )
+
+    return items
