@@ -425,9 +425,15 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         caps = f.get("capabilities", set()) or set()
         bin_info = f["binary_info"]
         nopasswd = f["nopasswd"]
+        risk_categories = f.get("risk_categories", set()) or set()
 
         # Special case for NOPASSWD: ALL style rules.
         if binary is None and f.get("is_all_rule"):
+            operator_research_global: List[str] = [
+                "Enumerate which existing tools on this host can edit privileged configuration, manage services, or provide interactive shells under sudo.",
+                "For each such tool, check whether it has publicly documented sudo-abuse patterns (for example via GTFOBins or vendor documentation).",
+                "Map those patterns to high value targets on this host: sensitive data locations, service definitions, scheduled tasks, and identity/access control paths."
+            ]
             chains.append(
                 {
                     "title": "sudo -> full passwordless root access",
@@ -453,6 +459,7 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                         "High potential for system wide compromise and stealthy persistence if left unaddressed."
                     ],
                     "gtfobins_url": None,
+                    "operator_research": operator_research_global,
                 }
             )
             continue
@@ -532,6 +539,38 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                 "Meaningful elevated operations may be possible depending on how this binary is used in the environment."
             )
 
+        # Operator research checklist: press-X-to-pwn guidance without X.
+        operator_research: List[str] = []
+
+        if binary and f.get("gtfobins_url"):
+            operator_research.append(
+                f"Review the GTFOBins entry for {binary}, focusing on sections that describe sudo-based behaviour and elevated file or process control."
+            )
+
+        if "sudo_editor_nopasswd" in risk_categories:
+            operator_research.extend([
+                "Identify which privileged configuration or service files this editor could realistically modify on this host.",
+                "Map potential editor-based changes to security impact: access control, services, scheduled tasks, or authentication flows.",
+            ])
+
+        if "sudo_interpreter_nopasswd" in risk_categories or "sudo_interpreter_rule" in risk_categories:
+            operator_research.extend([
+                "List high value privileged actions that could be scripted (for example copying sensitive data, provisioning new privileged accounts, or automating configuration changes).",
+                "Consider how interpreter access could chain into other privilege escalation surfaces already identified on this host.",
+            ])
+
+        if "sudo_platform_control" in risk_categories or "sudo_service_control" in risk_categories:
+            operator_research.extend([
+                "Identify which services or workloads are managed by this tool and what their intended security boundaries are.",
+                "Assess whether new privileged workloads or services could be introduced that change or bypass those boundaries.",
+            ])
+
+        if "sudo_exec_hook_tool" in risk_categories:
+            operator_research.extend([
+                "Review which execution hooks or callbacks this tool supports and how they behave when invoked under sudo.",
+                "Consider how those hooks could interact with existing files, directories or services on this host.",
+            ])
+
         chains.append(
             {
                 "title": title,
@@ -544,6 +583,7 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                 "defensive_actions": defensive_actions,
                 "impact": impact,
                 "gtfobins_url": f.get("gtfobins_url"),
+                "operator_research": operator_research,
             }
         )
 
@@ -686,8 +726,14 @@ def run(state: dict, report: Report):
             lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
             if caps:
                 lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
+            cats = f["risk_categories"]
+            if cats:
+                lines.append(f"  - Risk categories   : {', '.join(sorted(cats))}")
             if f["gtfobins_url"]:
-                lines.append(f"  - External reference: {f['gtfobins_url']}")
+                lines.append(
+                    f"  - External reference: {f['gtfobins_url']} "
+                    f"(public catalogue of known sudo-abuse patterns for {f['binary']})"
+                )
             lines.append("")
         lines.append("")
 
@@ -707,8 +753,14 @@ def run(state: dict, report: Report):
             lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
             if caps:
                 lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
+            cats = f["risk_categories"]
+            if cats:
+                lines.append(f"  - Risk categories   : {', '.join(sorted(cats))}")
             if f["gtfobins_url"]:
-                lines.append(f"  - External reference: {f['gtfobins_url']}")
+                lines.append(
+                    f"  - External reference: {f['gtfobins_url']} "
+                    f"(public catalogue of known sudo-abuse patterns for {f['binary']})"
+                )
             lines.append("")
         lines.append("")
 
@@ -728,8 +780,14 @@ def run(state: dict, report: Report):
             lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
             if caps:
                 lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
+            cats = f["risk_categories"]
+            if cats:
+                lines.append(f"  - Risk categories   : {', '.join(sorted(cats))}")
             if f["gtfobins_url"]:
-                lines.append(f"  - External reference: {f['gtfobins_url']}")
+                lines.append(
+                    f"  - External reference: {f['gtfobins_url']} "
+                    f"(public catalogue of known sudo-abuse patterns for {f['binary']})"
+                )
             lines.append("")
         lines.append("")
 
@@ -749,8 +807,14 @@ def run(state: dict, report: Report):
             lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
             if caps:
                 lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
+            cats = f["risk_categories"]
+            if cats:
+                lines.append(f"  - Risk categories   : {', '.join(sorted(cats))}")
             if f["gtfobins_url"]:
-                lines.append(f"  - External reference: {f['gtfobins_url']}")
+                lines.append(
+                    f"  - External reference: {f['gtfobins_url']} "
+                    f"(public catalogue of known sudo-abuse patterns for {f['binary']})"
+                )
             lines.append("")
         lines.append("")
 
@@ -798,6 +862,13 @@ def run(state: dict, report: Report):
                     chain_lines.append(f"- {line}")
                 chain_lines.append("")
 
+            operator_research = c.get("operator_research") or []
+            if operator_research:
+                chain_lines.append("Operator research checklist:")
+                for item in operator_research:
+                    chain_lines.append(f"- {item}")
+                chain_lines.append("")
+
             chain_lines.append("High level offensive path (for red teams and threat modelling):")
             chain_lines.append("")
             for idx, step in enumerate(c["offensive_steps"], start=1):
@@ -821,7 +892,10 @@ def run(state: dict, report: Report):
 
             refs: List[str] = []
             if c.get("gtfobins_url"):
-                refs.append(f"GTFOBins entry for {binary}: {c['gtfobins_url']}")
+                refs.append(
+                    f"GTFOBins entry for {binary}: {c['gtfobins_url']} "
+                    f"(documented techniques for abusing {binary} under sudo)"
+                )
 
             if refs:
                 chain_lines.append("References:")
@@ -830,3 +904,4 @@ def run(state: dict, report: Report):
                 chain_lines.append("")
 
         report.add_section("Sudo Attack Chains", chain_lines)
+
