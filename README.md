@@ -203,7 +203,7 @@ cache/nullpeas_report.md
 
 ---
 
-## ⚖ Ethics
+## Ethics
 
 Nullpeas exists to:
 - Teach  
