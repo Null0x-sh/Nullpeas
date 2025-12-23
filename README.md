@@ -1,221 +1,222 @@
 # Nullpeas
 
-**Disclaimer**  
-> I am currently transitioning into a cybersecurity career and actively learning offensive security, tooling development and software engineering.  
-> Nullpeas is both a passion project **and** a learning project - expect evolution, iteration, breaking changes and constant refinement as I grow.  
-> This tool is not being presented as a finished “professional grade” product **yet**.  
-> It exists to help me learn deeply and hopefully help others learn alongside me.  
+Nullpeas is a modular, reasoning-driven privilege escalation assistant.  
+It is built to be quieter, smarter and more educational than traditional large privilege escalation scripts.
 
-> **Nullpeas is for authorised security testing and education only.  
-> If you are not legally permitted to test a system, do not run this tool.**
+![Status](https://img.shields.io/badge/status-active-blue)
+![Language](https://img.shields.io/badge/python-3.10+-yellow)
+![Purpose](https://img.shields.io/badge/focus-education-green)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ---
 
-## What is Nullpeas?
+## Disclaimer
 
-Nullpeas is a **modular privilege escalation assistant** designed to move beyond the traditional giant noisy Bash script that dumps endless text and leaves the operator overwhelmed.
+I am currently transitioning into a cybersecurity career and actively learning offensive security, tooling development and software engineering.
 
-Instead, Nullpeas takes a **signal-over-noise** approach:
+Nullpeas is both a passion project and a learning project. Expect evolution, iteration, breaking changes and refinement as I grow.
 
-- Collects structured host intelligence and builds shared state  
-- Caches findings instead of repeating loud checks  
-- Activates only relevant analysis modules  
-- Thinks like an operator and explains risk  
-- Produces reasoning, not raw noise  
-- Is deliberately quieter where possible  
-- Designed to **guide, educate and inform**, not overwhelm  
+This tool is not being presented as a completed professional grade product.
 
-Nullpeas doesn’t just say *“maybe something interesting here”*.  
-It tries to explain:
+Nullpeas is for authorised security testing and education only.  
+If you are not legally permitted to test a system, do not run this tool.
 
-- **Why** something is risky  
-- **How attackers reason about it**  
-- **What to research next**  
-- **How defenders should fix it**  
-- **Where to read more (trusted sources)**  
+---
 
-Goal:
-> Bridge the gap between “this might be exploitable” and “I understand the full attack and defense story here”.
+## What is Nullpeas
+
+Nullpeas is a modular privilege escalation assistant designed to move beyond the traditional giant noisy Bash script that dumps endless output and overwhelms the operator.
+
+Nullpeas focuses on signal over noise:
+
+- Collects structured host intelligence
+- Builds and caches shared state
+- Activates only relevant analysis modules
+- Produces reasoning and context instead of noise
+- Guides the operator rather than drowning them in text
+- Explains attacker and defender viewpoints
+- Supports learning rather than blind exploitation
+
+Nullpeas does not simply report that something might be exploitable. It attempts to explain:
+
+- Why it is risky
+- How attackers reason about it
+- What to research next
+- How defenders should fix it
+- Where to read more
+
+The goal is to bridge the gap between:
+
+"This might be exploitable"  
+and  
+"I understand the attack, defense, risk, and reasoning behind this finding"
 
 ---
 
 ## Current Status
 
-Nullpeas is now a structured, evolving framework.
+Nullpeas is now a structured and evolving framework.
 
-- Fully structured Python project  
-- Multi-probe discovery engine  
-- Shared cached state system  
-- Trigger driven module system  
-- Markdown reporting  
-- Ethical reasoning-first approach  
-
-### Actively Working
-✔️ Probing engine  
-✔️ Threaded execution  
-✔️ Trigger logic  
-✔️ Cache system  
-✔️ Guidance framework  
-✔️ Beautiful structured reports  
+- Structured Python project layout
+- Probing engine
+- Shared cached state
+- Trigger logic
+- Reasoning and guidance system
+- Markdown reporting
+- Threaded execution
+- Designed to be quieter where appropriate
 
 ---
 
 ## Implemented Modules
 
 ### Sudo Analysis
-- Parses `sudo -l`
-- Detects passwordless & dangerous configs
-- Classifies binary capability categories
-- Scores severity + confidence
-- Produces attack-chain reasoning
-- Operator guidance + defender remediation
-- Reference links
+- Parses sudo -l
+- Detects passwordless and dangerous configurations
+- Categorises binary risk capability
+- Assigns severity and confidence scoring
+- Provides attacker reasoning
+- Provides defender remediation
+- Includes reference learning links
 
----
+### Docker Platform Risk
+- Detects Docker host vs container context
+- Identifies Docker socket exposure risk
+- Understands platform control boundaries
+- Zero touch analysis
+- Severity assessment
+- Attacker and defender reasoning
+- Practical remediation guidance
 
-### Docker Escape / Platform Risk
-- Evaluates Docker daemon trust boundary
-- Detects socket exposure & user access
-- Understands container vs host context
-- Assigns platform_control / container_escape
-- Scores severity + confidence
-- Produces attack-chain logic
-- Defensive remediation guidance
-- Zero-touch, no Docker interaction
-
----
-
-### Cron Scheduled Execution Risk
-- Reviews cron configuration
-- Detects writable cron paths
+### Cron Abuse Risk
+- Evaluates cron job privilege surfaces
+- Detects writable paths
 - Identifies privilege boundaries
 - Explains escalation logic
-- Produces attacker + defender reasoning
+- Provides practical guidance
 
 ---
 
 ## Design Philosophy
 
 ### Modular
-- Each probe independent  
-- Each module only runs when relevant  
+- Each probe independent
+- Each module only runs when relevant
 
 ### Smart
-- Context aware  
-- Privilege boundary aware  
-- Risk focused  
+- Context aware
+- Privilege boundary aware
+- Risk focused
 
-### Cache-Aware
-- Avoid repeating loud operations  
-- Faster + safer  
+### Cache Aware
+- Avoids repeating loud operations
+- Faster and safer
 
 ### Readable
-Output should:
-- Teach  
-- Guide  
-- Provide insight  
-- Make next actions clear  
+Output should teach, guide and help thinking.  
+Not overwhelm.
 
-### Explain-First
-Nullpeas is **not**:
-- An exploit dropper  
-- A weapon builder  
-
-Nullpeas **is**:
-- An analyst  
-- A teacher  
-- A reasoning companion  
-
-Modules do not execute exploits.  
-They do not hand payloads.  
-
-They give:
-- Attack-chain logic  
-- Research direction  
-- Navigation guidance  
-- Blue-team remediation  
-- Reference learning  
-
-Think:
-> “Press X To Pwn — but **YOU** must find X.  
-> Nullpeas gives every clue, thought process, and resource needed.”
+### Explain First
+Nullpeas is not an exploit execution tool.  
+Modules do not perform exploitation.  
+They explain, teach and guide thinking.
 
 ---
 
-## Architecture (High-Level)
+## Architecture Overview
 
-brain.py — orchestrator  
-• runs probes  
-• builds state  
-• derives triggers  
-• prints summary  
-• runs modules  
-• writes Markdown report  
+```
+brain.py        Orchestrator
+core/cache.py   Persistent state
+core/report.py  Markdown writer
+core/guidance.py Reasoning engine
 
-core/cache.py — persistent state  
-core/report.py — Markdown writer  
-core/guidance.py — central reasoning engine  
+probes/*        Host intelligence collectors
+modules/*       Risk analysis logic
 
-probes/* → host intelligence collectors  
-modules/* → analysis + reasoning units  
+cache/state.json
+cache/nullpeas_report.md
+```
 
-cache/state.json → cached runtime data  
+---
+
+## Screenshots and Demo
+
+Coming soon.
+
+Recommended future assets:
+- Terminal summary output
+- Markdown report excerpt
+- Example reasoning block
+- Short GIF of running execution to final report
 
 ---
 
 ## How To Run
 
-Clone the repo and execute:
+```bash
+git clone https://github.com/Null0x-sh/Nullpeas
+cd Nullpeas
+chmod +x brain.py
+./brain.py
+```
 
-git clone https://github.com/Null0x-sh/Nullpeas  
-cd Nullpeas  
-chmod +x brain.py  
-./brain.py  
+Output report location:
+
+```
+cache/nullpeas_report.md
+```
 
 ---
 
 ## Example Behaviour
 
 Nullpeas can:
-- Detect sudo privilege surfaces  
-- Detect docker escape potential  
-- Detect cron abuse paths  
-- Detect containerized environments  
-- Provide recommendations  
-- Trigger relevant modules  
-- Produce final Markdown report in:
 
-cache/nullpeas_report.md
+- Detect sudo privilege surfaces
+- Detect Docker escape potential
+- Detect cron abuse paths
+- Detect containerised environments
+- Trigger relevant reasoning modules
+- Produce structured Markdown reports
 
 ---
 
 ## Roadmap
 
-- LXD / LXC privilege surfaces  
-- PATH hijack chains  
-- Linux capability analysis  
-- Service + systemd misconfiguration logic  
-- Kernel exploit reasoning (explain-only)  
-- Better OPSEC + stealth tuning  
-- UX improvements  
-- Testing / CI in future  
-- Community extension support  
+- LXD and LXC analysis
+- PATH hijack logic
+- Linux capabilities analysis
+- Systemd and service misconfiguration logic
+- Kernel exploit reasoning only
+- OPSEC and stealth improvements
+- UX improvements
+- CI and automated testing
+- Community extension support
+
+---
+
+## Contributing
+
+Contributions, discussion and learning collaboration are welcome.  
+This project is part of a personal learning journey and community involvement is encouraged.
 
 ---
 
 ## Ethics
 
 Nullpeas exists to:
-- Teach  
-- Improve defenders  
-- Assist authorised red teams  
-- Help newcomers learn responsibly  
 
-It is NOT built for illegal activity.  
-It is a reasoning + educational framework.
+- Teach
+- Improve defenders
+- Assist authorised red teamers
+- Help newcomers learn responsibly
+
+It is not intended for illegal activity or abuse.
 
 ---
 
-If you made it this far welcome 👋  
-This project is a journey as I grow in cybersecurity and engineering.  
-Expect evolution. Expect improvement. Stay tuned.
+## Closing
+
+If you reached this point, thank you for taking interest in Nullpeas.  
+This project will continue to evolve significantly over time.
