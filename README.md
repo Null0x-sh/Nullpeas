@@ -1,7 +1,7 @@
 # Nullpeas
 
-Nullpeas is a modular, reasoning-driven privilege escalation assistant.  
-It is built to be quieter, smarter and more educational than traditional large privilege escalation scripts.
+Nullpeas is a modular, reasoning-driven Linux privilege escalation assistant.  
+It is designed to be quieter, smarter, and more educational than traditional large privilege escalation scripts.
 
 ![Status](https://img.shields.io/badge/status-active-blue)
 ![Language](https://img.shields.io/badge/python-3.10+-yellow)
@@ -12,11 +12,11 @@ It is built to be quieter, smarter and more educational than traditional large p
 
 ## Disclaimer
 
-I am currently transitioning into a cybersecurity career and actively learning offensive security, tooling development and software engineering.
+I am currently transitioning into a cybersecurity career and actively learning offensive security, tooling development, and software engineering.
 
-Nullpeas is both a passion project and a learning project. Expect evolution, iteration, breaking changes and refinement as I grow.
+Nullpeas is both a passion project and a learning project. Expect evolution, iteration, refinement, and occasional breaking changes.
 
-This tool is not being presented as a completed professional grade product.
+This is not being presented as a finished professional product.
 
 Nullpeas is for authorised security testing and education only.  
 If you are not legally permitted to test a system, do not run this tool.
@@ -25,37 +25,37 @@ If you are not legally permitted to test a system, do not run this tool.
 
 ## What is Nullpeas
 
-Nullpeas is a modular privilege escalation assistant designed to move beyond the traditional giant noisy Bash script that dumps endless output and overwhelms the operator.
+Nullpeas is a modular privilege escalation assistant intended to move beyond traditional noisy enumeration scripts that dump thousands of lines of output and overwhelm the operator.
 
 Nullpeas focuses on signal over noise:
 
 - Collects structured host intelligence
 - Builds and caches shared state
 - Activates only relevant analysis modules
-- Produces reasoning and context instead of noise
-- Guides the operator rather than drowning them in text
-- Explains attacker and defender viewpoints
+- Produces reasoning and context instead of blind data
+- Guides the operator instead of drowning them in text
+- Explains attacker and defender perspectives
 - Supports learning rather than blind exploitation
 
-Nullpeas does not simply report that something might be exploitable. It attempts to explain:
+Nullpeas does not simply say “this may be exploitable.” It attempts to explain:
 
 - Why it is risky
-- How attackers reason about it
+- How attackers think about it
 - What to research next
 - How defenders should fix it
-- Where to read more
+- Where to learn more
 
 The goal is to bridge the gap between:
 
-"This might be exploitable"  
+“This might be exploitable”  
 and  
-"I understand the attack, defense, risk, and reasoning behind this finding"
+“I understand the attack, the risk, the defensive posture, and the reasoning behind this finding.”
 
 ---
 
 ## Current Status
 
-Nullpeas is now a structured and evolving framework.
+Nullpeas is an evolving structured framework.
 
 - Structured Python project layout
 - Probing engine
@@ -71,27 +71,27 @@ Nullpeas is now a structured and evolving framework.
 ## Implemented Modules
 
 ### Sudo Analysis
-- Parses sudo -l
+- Parses sudo -l output
 - Detects passwordless and dangerous configurations
-- Categorises binary risk capability
+- Categorises binary capability risk
 - Assigns severity and confidence scoring
 - Provides attacker reasoning
-- Provides defender remediation
-- Includes reference learning links
+- Provides defender remediation guidance
+- Includes learning references
 
 ### Docker Platform Risk
 - Detects Docker host vs container context
 - Identifies Docker socket exposure risk
-- Understands platform control boundaries
-- Zero touch analysis
+- Understands privilege boundaries
+- Zero-touch analysis approach
 - Severity assessment
-- Attacker and defender reasoning
+- Reasoning for both attacker and defender perspectives
 - Practical remediation guidance
 
 ### Cron Abuse Risk
-- Evaluates cron job privilege surfaces
+- Evaluates cron privilege surfaces
 - Detects writable paths
-- Identifies privilege boundaries
+- Identifies escalation potential
 - Explains escalation logic
 - Provides practical guidance
 
@@ -101,7 +101,7 @@ Nullpeas is now a structured and evolving framework.
 
 ### Modular
 - Each probe independent
-- Each module only runs when relevant
+- Modules only run when relevant
 
 ### Smart
 - Context aware
@@ -113,30 +113,27 @@ Nullpeas is now a structured and evolving framework.
 - Faster and safer
 
 ### Readable
-Output should teach, guide and help thinking.  
+Output should teach, guide, and support clear thinking.  
 Not overwhelm.
 
 ### Explain First
-Nullpeas is not an exploit execution tool.  
-Modules do not perform exploitation.  
-They explain, teach and guide thinking.
+Nullpeas does not execute exploitation.  
+It explains, teaches, and supports reasoning.
 
 ---
 
 ## Architecture Overview
 
-```
-brain.py        Orchestrator
-core/cache.py   Persistent state
-core/report.py  Markdown writer
-core/guidance.py Reasoning engine
+    brain.py            Orchestrator
+    core/cache.py       Persistent state
+    core/report.py      Markdown writer
+    core/guidance.py    Reasoning engine
 
-probes/*        Host intelligence collectors
-modules/*       Risk analysis logic
+    probes/*            Host intelligence collectors
+    modules/*           Risk analysis logic
 
-cache/state.json
-cache/nullpeas_report.md
-```
+    cache/state.json
+    cache/nullpeas_report.md
 
 ---
 
@@ -144,28 +141,24 @@ cache/nullpeas_report.md
 
 Coming soon.
 
-Recommended future assets:
-- Terminal summary output
+Planned examples:
+- Terminal summary
 - Markdown report excerpt
-- Example reasoning block
-- Short GIF of running execution to final report
+- Reasoning block example
+- Short execution demo
 
 ---
 
 ## How To Run
 
-```bash
-git clone https://github.com/Null0x-sh/Nullpeas
-cd Nullpeas
-chmod +x brain.py
-./brain.py
-```
+    git clone https://github.com/Null0x-sh/Nullpeas
+    cd Nullpeas
+    chmod +x brain.py
+    ./brain.py
 
-Output report location:
+Report output:
 
-```
-cache/nullpeas_report.md
-```
+    cache/nullpeas_report.md
 
 ---
 
@@ -176,7 +169,7 @@ Nullpeas can:
 - Detect sudo privilege surfaces
 - Detect Docker escape potential
 - Detect cron abuse paths
-- Detect containerised environments
+- Detect container environments
 - Trigger relevant reasoning modules
 - Produce structured Markdown reports
 
@@ -185,7 +178,7 @@ Nullpeas can:
 ## Roadmap
 
 - LXD and LXC analysis
-- PATH hijack logic
+- PATH hijack detection
 - Linux capabilities analysis
 - Systemd and service misconfiguration logic
 - Kernel exploit reasoning only
@@ -198,8 +191,8 @@ Nullpeas can:
 
 ## Contributing
 
-Contributions, discussion and learning collaboration are welcome.  
-This project is part of a personal learning journey and community involvement is encouraged.
+Contributions, discussion, and learning collaboration are welcome.  
+This project is part of a personal learning journey, and community involvement is encouraged.
 
 ---
 
@@ -212,11 +205,11 @@ Nullpeas exists to:
 - Assist authorised red teamers
 - Help newcomers learn responsibly
 
-It is not intended for illegal activity or abuse.
+It is not intended for illegal activity.
 
 ---
 
 ## Closing
 
-If you reached this point, thank you for taking interest in Nullpeas.  
+Thank you for taking interest in Nullpeas.  
 This project will continue to evolve significantly over time.
