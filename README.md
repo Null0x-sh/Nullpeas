@@ -216,6 +216,6 @@ It is a reasoning + educational framework.
 
 ---
 
-If you made it this far — welcome 👋  
+If you made it this far welcome 👋  
 This project is a journey as I grow in cybersecurity and engineering.  
 Expect evolution. Expect improvement. Stay tuned.
