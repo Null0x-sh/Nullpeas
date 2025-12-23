@@ -3,6 +3,7 @@ import re
 
 from nullpeas.core.exec import run_command
 from nullpeas.core.report import Report
+from nullpeas.core.guidance import build_guidance, FindingContext
 from nullpeas.modules import register_module
 
 
@@ -75,7 +76,7 @@ GTF0BINS_URLS: Dict[str, str] = {
 # Capability categories describe what a binary can realistically do in an escalation context.
 GTF0BINS_CAPABILITIES: Dict[str, Set[str]] = {
     "vim": {"editor_escape", "shell_spawn", "file_read", "file_write"},
-    "vi": {"editor_escape", "shell_spawn", "file_read", "file_write"},
+    "vi": {"editor_escape, shell_spawn", "file_read", "file_write"},
     "nano": {"editor_escape", "file_read", "file_write"},
     "ed": {"editor_escape", "file_read", "file_write"},
 
@@ -99,48 +100,6 @@ GTF0BINS_CAPABILITIES: Dict[str, Set[str]] = {
 
     "docker": {"platform_control"},
     "systemctl": {"platform_control"},
-}
-
-
-# Navigation guidance is high level text that helps operators know where inside a tool
-# they should be looking, without supplying exploit payloads.
-NAVIGATION_GUIDANCE: Dict[str, List[str]] = {
-    "editor_escape": [
-        "This is an editor running with elevated privileges.",
-        "Look for features that run external commands, open subshell like contexts, or load helpers.",
-        "Explore scripting, macros, or plugin systems that may execute system actions."
-    ],
-    "pager_escape": [
-        "This is a pager or viewer running with elevated privileges.",
-        "Explore interactive features that go beyond simple scrolling.",
-        "Look for ways to launch helpers, open editors, or otherwise leave the standard viewing mode."
-    ],
-    "interpreter": [
-        "This is a full language runtime running with elevated privileges.",
-        "Look for APIs that execute operating system commands or manipulate files.",
-        "Any script executed here inherits the privileges granted by sudo."
-    ],
-    "exec_hook": [
-        "This tool can execute other programs as part of its normal usage.",
-        "Execution hooks or callbacks will run with the privileges granted by sudo.",
-        "Abuse potential often lives in parameters that tell the tool what to run per file or per match."
-    ],
-    "shell_spawn": [
-        "This binary can act very similar to a shell or can lead to a shell like execution context.",
-        "Once a privileged shell like environment is reached, typical post escalation actions are possible."
-    ],
-    "file_write": [
-        "This tool can write or overwrite files with elevated privileges.",
-        "Writing to configuration files, service definitions, or key material can lead to persistence or further compromise."
-    ],
-    "file_read": [
-        "This tool can read files that are normally restricted to privileged users.",
-        "Sensitive configuration, key material, or credentials may be accessible from this context."
-    ],
-    "platform_control": [
-        "This tool controls core services or platform level resources.",
-        "Operations here may allow starting privileged services, containers, or other components that lead to host compromise."
-    ],
 }
 
 
@@ -391,27 +350,20 @@ def _confidence_for_rule(
     return 3.0, "Low"
 
 
-def _build_navigation_guidance(capabilities: Set[str]) -> List[str]:
-    lines: List[str] = []
-    seen: Set[str] = set()
-
-    for cap in sorted(capabilities):
-        guidance_lines = NAVIGATION_GUIDANCE.get(cap) or []
-        for line in guidance_lines:
-            if line not in seen:
-                seen.add(line)
-                lines.append(line)
-
-    return lines
+def _title_for_sudo_chain(binary: Optional[str], risk_categories: Set[str]) -> str:
+    if "sudo_global_nopasswd_all" in risk_categories:
+        return "sudo -> full passwordless root access"
+    if binary:
+        return f"sudo -> {binary} -> elevated actions"
+    return "sudo-based privilege escalation surface"
 
 
 def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Build high level attack chain descriptions per relevant sudo finding.
 
-    Chains describe how an attacker could move from current user to a more privileged
-    context using the rule, and how a defender could break that chain. They do not
-    contain exploit payloads or one liners.
+    Chains now delegate all narrative guidance (navigation, offensive/defensive,
+    impact, references) to the shared guidance engine.
     """
     chains: List[Dict[str, Any]] = []
 
@@ -423,167 +375,36 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         rule = f["raw_rule"]
         binary = f["binary"]
         caps = f.get("capabilities", set()) or set()
-        bin_info = f["binary_info"]
-        nopasswd = f["nopasswd"]
         risk_categories = f.get("risk_categories", set()) or set()
+        nopasswd = f["nopasswd"]
+        gtfobins_url = f.get("gtfobins_url")
 
-        # Special case for NOPASSWD: ALL style rules.
-        if binary is None and f.get("is_all_rule"):
-            operator_research_global: List[str] = [
-                "Enumerate which existing tools on this host can edit privileged configuration, manage services, or provide interactive shells under sudo.",
-                "For each such tool, check whether it has publicly documented sudo-abuse patterns (for example via GTFOBins or vendor documentation).",
-                "Map those patterns to high value targets on this host: sensitive data locations, service definitions, scheduled tasks, and identity/access control paths."
-            ]
-            chains.append(
-                {
-                    "title": "sudo -> full passwordless root access",
-                    "rule": rule,
-                    "binary": None,
-                    "severity_band": severity_band,
-                    "severity_score": f["severity_score"],
-                    "capabilities": {"shell_spawn", "file_read", "file_write", "platform_control"},
-                    "offensive_steps": [
-                        "Confirm that sudo is usable from the current user and that this broad rule applies.",
-                        "Use sudo to invoke a preferred shell or administrative tool with elevated privileges.",
-                        "From the elevated context, perform further actions such as reading or modifying sensitive files, "
-                        "changing configuration, or establishing persistence, subject to engagement scope."
-                    ],
-                    "defensive_actions": [
-                        "Identify why a NOPASSWD: ALL style rule exists and whether it is still required.",
-                        "Replace NOPASSWD: ALL with tightly scoped command specific rules where possible.",
-                        "Where feasible, remove NOPASSWD so that privileged actions require authentication.",
-                        "Introduce monitoring and alerting for broad sudo usage and regularly review sudoers configuration."
-                    ],
-                    "impact": [
-                        "Effective full root level capabilities from the affected account.",
-                        "High potential for system wide compromise and stealthy persistence if left unaddressed."
-                    ],
-                    "gtfobins_url": None,
-                    "operator_research": operator_research_global,
-                }
-            )
-            continue
+        ctx: FindingContext = {
+            "surface": "sudo",
+            "rule": rule,
+            "binary": binary,
+            "capabilities": caps,
+            "risk_categories": risk_categories,
+            "severity_band": severity_band,
+            "severity_score": f["severity_score"],
+            "nopasswd": nopasswd,
+            "gtfobins_url": gtfobins_url,
+            "metadata": {
+                "binary_info": f["binary_info"],
+            },
+        }
 
-        if not binary:
-            continue
-
-        title = f"sudo -> {binary} -> elevated actions"
-
-        prereq_binary_desc = (
-            "Binary is present in PATH and responds to basic version or help probes."
-            if bin_info.get("exists_in_path") and bin_info.get("version_check_ok")
-            else "Binary appears to be present but may require manual validation on this host."
-        )
-
-        offensive_steps: List[str] = []
-
-        # Basic offensive chain structure.
-        offensive_steps.append(
-            "From the compromised user, confirm that sudo is available and that this rule applies."
-        )
-
-        if nopasswd:
-            offensive_steps.append(
-                "Use sudo to run this allowed binary without needing a password."
-            )
-        else:
-            offensive_steps.append(
-                "Use sudo to run this allowed binary, providing credentials if engagement rules allow."
-            )
-
-        offensive_steps.append(
-            "Within the elevated execution context of this binary, explore features that align with its capabilities "
-            "to achieve privileged goals. For example, this may involve running system commands, reading sensitive files, "
-            "or writing to configuration or service files, depending on the binary."
-        )
-
-        offensive_steps.append(
-            "From that privileged context, perform post escalation actions such as data access, configuration inspection, "
-            "or further lateral movement, within the bounds of the engagement."
-        )
-
-        defensive_actions: List[str] = [
-            "Review why this binary is allowed under sudo for this user or group.",
-            "If only a narrow operation is required, replace general purpose tools with tightly scoped helpers.",
-        ]
-
-        if nopasswd:
-            defensive_actions.append(
-                "Remove NOPASSWD where possible so that privileged actions require explicit authentication."
-            )
-
-        defensive_actions.append(
-            "Log and monitor sudo usage of powerful interactive tools, interpreters, or platform control binaries."
-        )
-        defensive_actions.append(prereq_binary_desc)
-
-        impact: List[str] = []
-        if "shell_spawn" in caps or "interpreter" in caps:
-            impact.append(
-                "Likely ability to obtain a shell like or fully programmable privileged execution context."
-            )
-        if "file_read" in caps:
-            impact.append(
-                "Potential to read files normally restricted to higher privileged users."
-            )
-        if "file_write" in caps:
-            impact.append(
-                "Potential to modify configuration, service, or other important files with elevated privileges."
-            )
-        if "platform_control" in caps:
-            impact.append(
-                "Ability to control services, containers, or platform components that may lead to host compromise."
-            )
-        if not impact:
-            impact.append(
-                "Meaningful elevated operations may be possible depending on how this binary is used in the environment."
-            )
-
-        # Operator research checklist: press-X-to-pwn guidance without X.
-        operator_research: List[str] = []
-
-        if binary and f.get("gtfobins_url"):
-            operator_research.append(
-                f"Review the GTFOBins entry for {binary}, focusing on sections that describe sudo-based behaviour and elevated file or process control."
-            )
-
-        if "sudo_editor_nopasswd" in risk_categories:
-            operator_research.extend([
-                "Identify which privileged configuration or service files this editor could realistically modify on this host.",
-                "Map potential editor-based changes to security impact: access control, services, scheduled tasks, or authentication flows.",
-            ])
-
-        if "sudo_interpreter_nopasswd" in risk_categories or "sudo_interpreter_rule" in risk_categories:
-            operator_research.extend([
-                "List high value privileged actions that could be scripted (for example copying sensitive data, provisioning new privileged accounts, or automating configuration changes).",
-                "Consider how interpreter access could chain into other privilege escalation surfaces already identified on this host.",
-            ])
-
-        if "sudo_platform_control" in risk_categories or "sudo_service_control" in risk_categories:
-            operator_research.extend([
-                "Identify which services or workloads are managed by this tool and what their intended security boundaries are.",
-                "Assess whether new privileged workloads or services could be introduced that change or bypass those boundaries.",
-            ])
-
-        if "sudo_exec_hook_tool" in risk_categories:
-            operator_research.extend([
-                "Review which execution hooks or callbacks this tool supports and how they behave when invoked under sudo.",
-                "Consider how those hooks could interact with existing files, directories or services on this host.",
-            ])
+        guidance = build_guidance(ctx)
 
         chains.append(
             {
-                "title": title,
+                "title": _title_for_sudo_chain(binary, risk_categories),
                 "rule": rule,
                 "binary": binary,
                 "severity_band": severity_band,
                 "severity_score": f["severity_score"],
                 "capabilities": caps,
-                "offensive_steps": offensive_steps,
-                "defensive_actions": defensive_actions,
-                "impact": impact,
-                "gtfobins_url": f.get("gtfobins_url"),
-                "operator_research": operator_research,
+                "guidance": guidance,
             }
         )
 
@@ -604,7 +425,7 @@ def run(state: dict, report: Report):
     - Assigns capability categories for known binaries.
     - Quietly verifies candidate binaries exist and can execute basic probes.
     - Computes severity and confidence scores.
-    - Builds high level attack chains with offensive and defensive viewpoints.
+    - Builds high level attack chains with guidance from the shared framework.
     - Writes human readable sections into the report.
     """
     sudo = state.get("sudo", {}) or {}
@@ -820,7 +641,7 @@ def run(state: dict, report: Report):
 
     report.add_section("Sudo Analysis", lines)
 
-    # Build attack chains section.
+    # Build attack chains section using the shared guidance engine.
     chains = _build_attack_chains(findings)
     if chains:
         chain_lines: List[str] = []
@@ -836,6 +657,7 @@ def run(state: dict, report: Report):
         for c in chains:
             caps = c.get("capabilities", set()) or set()
             binary = c.get("binary")
+            guidance = c["guidance"]
 
             chain_lines.append(f"### {c['title']}")
             chain_lines.append("")
@@ -845,6 +667,7 @@ def run(state: dict, report: Report):
             chain_lines.append("Severity:")
             chain_lines.append(f"- {c['severity_band']} ({c['severity_score']}/10)")
             chain_lines.append("")
+
             if binary:
                 chain_lines.append("Binary:")
                 chain_lines.append(f"- {binary}")
@@ -855,53 +678,54 @@ def run(state: dict, report: Report):
                 chain_lines.append(f"- {', '.join(sorted(caps))}")
                 chain_lines.append("")
 
-            nav_guidance = _build_navigation_guidance(caps)
-            if nav_guidance:
+            nav = guidance.get("navigation") or []
+            if nav:
                 chain_lines.append("Navigation guidance (for operators):")
-                for line in nav_guidance:
+                for line in nav:
                     chain_lines.append(f"- {line}")
                 chain_lines.append("")
 
-            operator_research = c.get("operator_research") or []
+            operator_research = guidance.get("operator_research") or []
             if operator_research:
                 chain_lines.append("Operator research checklist:")
                 for item in operator_research:
                     chain_lines.append(f"- {item}")
                 chain_lines.append("")
 
-            chain_lines.append("High level offensive path (for red teams and threat modelling):")
-            chain_lines.append("")
-            for idx, step in enumerate(c["offensive_steps"], start=1):
-                chain_lines.append(f"{idx}. {step}")
-            chain_lines.append("")
-            chain_lines.append(
-                "Note: Nullpeas does not execute any of the above. These steps describe possible operator behaviour."
-            )
-            chain_lines.append("")
-
-            chain_lines.append("Defensive remediation path (for blue teams):")
-            chain_lines.append("")
-            for idx, action in enumerate(c["defensive_actions"], start=1):
-                chain_lines.append(f"{idx}. {action}")
-            chain_lines.append("")
-
-            chain_lines.append("Potential impact if left unresolved:")
-            for imp in c["impact"]:
-                chain_lines.append(f"- {imp}")
-            chain_lines.append("")
-
-            refs: List[str] = []
-            if c.get("gtfobins_url"):
-                refs.append(
-                    f"GTFOBins entry for {binary}: {c['gtfobins_url']} "
-                    f"(documented techniques for abusing {binary} under sudo)"
+            offensive_steps = guidance.get("offensive_steps") or []
+            if offensive_steps:
+                chain_lines.append("High level offensive path (for red teams and threat modelling):")
+                chain_lines.append("")
+                for idx, step in enumerate(offensive_steps, start=1):
+                    chain_lines.append(f"{idx}. {step}")
+                chain_lines.append("")
+                chain_lines.append(
+                    "Note: Nullpeas does not execute any of the above. These steps describe possible operator behaviour."
                 )
+                chain_lines.append("")
 
+            defensive_actions = guidance.get("defensive_actions") or []
+            if defensive_actions:
+                chain_lines.append("Defensive remediation path (for blue teams):")
+                chain_lines.append("")
+                for idx, action in enumerate(defensive_actions, start=1):
+                    chain_lines.append(f"{idx}. {action}")
+                chain_lines.append("")
+
+            impact = guidance.get("impact") or []
+            if impact:
+                chain_lines.append("Potential impact if left unresolved:")
+                for imp in impact:
+                    chain_lines.append(f"- {imp}")
+                chain_lines.append("")
+
+            refs = guidance.get("references") or []
             if refs:
                 chain_lines.append("References:")
                 for ref in refs:
                     chain_lines.append(f"- {ref}")
                 chain_lines.append("")
 
-        report.add_section("Sudo Attack Chains", chain_lines)
+            chain_lines.append("")
 
+        report.add_section("Sudo Attack Chains", chain_lines)
