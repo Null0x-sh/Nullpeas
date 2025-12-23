@@ -24,7 +24,6 @@ from nullpeas.probes.runtime_probe import run as run_runtime_probe
 from nullpeas.modules import get_available_modules
 
 
-
 # ========================= Probes =========================
 
 def _run_probe_isolated(name, func):
@@ -85,7 +84,7 @@ def _build_triggers(state: dict):
     virt = runtime.get("virtualization", {}) or {}
     docker = runtime.get("docker", {}) or {}
 
-    triggers = {}
+    triggers: dict = {}
 
     triggers["is_root"] = bool(user.get("is_root"))
     triggers["in_sudo_group"] = bool(user.get("in_sudo_group"))
@@ -209,16 +208,16 @@ def _print_suggestions(state: dict):
         print()
         return
 
-    suggestions = []
+    suggestions: List[str] = []
 
     if triggers.get("passwordless_sudo_surface"):
         suggestions.append(
-            "[!] Passwordless sudo detected. Recommended: sudo_enum_module "
+            "[!] Passwordless sudo detected. Recommended: sudo_enum "
             "to analyse NOPASSWD rules and GTFOBins-style candidates."
         )
     elif triggers.get("sudo_privesc_surface"):
         suggestions.append(
-            "[>] Sudo rules present. Recommended: sudo_enum_module to parse sudo -l "
+            "[>] Sudo rules present. Recommended: sudo_enum to parse sudo -l "
             "and highlight potential escalation vectors."
         )
 
@@ -229,7 +228,8 @@ def _print_suggestions(state: dict):
 
     if triggers.get("docker_escape_surface"):
         suggestions.append(
-            "[>] Docker host surface detected. Future module: docker_surface_module."
+            "[!] Docker host surface detected. Recommended: docker_enum "
+            "to analyse Docker daemon access and potential container escape paths."
         )
 
     if triggers.get("container_escape_surface"):
@@ -288,7 +288,6 @@ def _interactive_modules(state: dict, report: Report):
     mod["run"](state, report)
 
 
-
 # ========================= Main =========================
 
 def main():
@@ -310,3 +309,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
