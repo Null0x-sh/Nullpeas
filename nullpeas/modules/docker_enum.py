@@ -2,71 +2,156 @@ from typing import Dict, Any, List, Set, Tuple
 
 from nullpeas.core.report import Report
 from nullpeas.modules import register_module
-from nullpeas.core.guidance import build_guidance, FindingContext
+from nullpeas.core.guidance import build_guidance, FindingContext, SeverityBand
 
 
-def _user_in_docker_group(user: Dict[str, Any]) -> bool:
-    if user.get("in_docker_group"):
-        return True
-    for g in user.get("groups", []):
-        if g.get("name") == "docker":
-            return True
-    return False
-
-
-def _socket_world_group_bits(mode_str: str) -> Tuple[bool, bool]:
+def _mode_to_int(mode_str: str) -> int:
     """
-    Given a string like '0660', return:
-      (world_writable_or_readable, group_writable_or_readable)
-    Very coarse – we just care about 'is this broadly accessible'.
+    Convert a string like '0660' or '660' into an int (octal).
+    Returns 0 on failure.
     """
+    if not mode_str:
+        return 0
+    s = mode_str.strip()
+    if s.startswith("0"):
+        s = s[1:]
     try:
-        mode_int = int(mode_str, 8)
-    except Exception:
-        return False, False
+        return int(s, 8)
+    except ValueError:
+        return 0
 
-    world_bits = mode_int & 0o007
-    group_bits = mode_int & 0o070
 
-    world_access = bool(world_bits)
-    group_access = bool(group_bits)
+def _docker_risk_categories(state: Dict[str, Any]) -> Set[str]:
+    """
+    Derive high-level risk categories from the collected runtime/docker info.
+    """
+    cats: Set[str] = set()
 
-    return world_access, group_access
+    runtime = state.get("runtime", {}) or {}
+    docker = runtime.get("docker", {}) or {}
+    container = runtime.get("container", {}) or {}
+    user = state.get("user", {}) or {}
+    triggers = state.get("triggers", {}) or {}
+
+    docker_binary_present = docker.get("binary_present", False)
+    docker_socket_exists = docker.get("socket_exists", False)
+    socket_mode_str = docker.get("socket_mode", "") or ""
+    socket_mode = _mode_to_int(socket_mode_str)
+    socket_group = docker.get("socket_group", None)
+
+    in_docker_group = user.get("in_docker_group", False) or triggers.get(
+        "in_docker_group", False
+    )
+    in_container = container.get("in_container", False)
+
+    # User-level daemon access via group membership.
+    if docker_binary_present and docker_socket_exists and in_docker_group:
+        cats.add("docker_user_daemon_access")
+
+    # Socket permissions.
+    # Other write bit -> world-writable.
+    if socket_mode & 0o002:
+        cats.add("docker_socket_world_writable")
+    # Group write bit (even if not "world") -> group-writable.
+    if socket_mode & 0o020:
+        cats.add("docker_socket_group_writable")
+
+    # Socket accessible from inside a container.
+    if in_container and docker_socket_exists:
+        cats.add("docker_socket_in_container")
+
+    # If the triggers think there is a docker/container escape surface,
+    # echo that back as a risk category.
+    if triggers.get("docker_escape_surface"):
+        cats.add("docker_escape_surface")
+
+    if triggers.get("container_escape_surface"):
+        cats.add("container_escape_surface")
+
+    return cats
+
+
+def _docker_capabilities_from_risk(risk_categories: Set[str]) -> Set[str]:
+    """
+    Map docker-related risk categories to capability tags understood by guidance.
+    """
+    caps: Set[str] = set()
+
+    if (
+        "docker_user_daemon_access" in risk_categories
+        or "docker_socket_world_writable" in risk_categories
+        or "docker_socket_group_writable" in risk_categories
+    ):
+        caps.add("platform_control")
+
+    if (
+        "docker_socket_in_container" in risk_categories
+        or "docker_escape_surface" in risk_categories
+        or "container_escape_surface" in risk_categories
+    ):
+        caps.add("container_escape")
+
+    # If the daemon can control volumes, that can be modelled as file_read/write
+    # even though it's indirect.
+    if "platform_control" in caps:
+        caps.add("file_read")
+        caps.add("file_write")
+
+    return caps
 
 
 def _docker_severity_and_confidence(
-    user_has_daemon_access: bool,
-    in_container: bool,
-    socket_world_access: bool,
-    socket_group_access: bool,
-) -> Tuple[Tuple[float, str], Tuple[float, str]]:
+    risk_categories: Set[str],
+    state: Dict[str, Any],
+) -> Tuple[float, SeverityBand, float, str]:
     """
-    Coarse severity + confidence model for Docker daemon access.
+    Basic scoring model for docker surfaces.
 
-    - user_has_daemon_access + not in_container => very high (host user == near-root)
-    - user_has_daemon_access + in_container    => high (container escape path)
-    - world-access or very loose permissions    => boosts severity
+    Returns:
+      (severity_score, severity_band, confidence_score, confidence_band)
     """
-    # ----- Severity -----
-    if user_has_daemon_access and not in_container:
-        base_sev = 0.9
-    elif user_has_daemon_access and in_container:
-        base_sev = 0.8
-    elif socket_world_access:
-        base_sev = 0.7
-    else:
-        base_sev = 0.4
+    runtime = state.get("runtime", {}) or {}
+    docker = runtime.get("docker", {}) or {}
 
-    if socket_world_access:
-        base_sev += 0.1
-    elif socket_group_access:
-        base_sev += 0.05
+    docker_binary_present = docker.get("binary_present", False)
+    docker_socket_exists = docker.get("socket_exists", False)
+    version_query_ok = docker.get("version_query_ok", False)
 
-    base_sev = max(0.0, min(1.0, base_sev))
-    severity_score = round(base_sev * 10.0, 1)
+    # ------------------------
+    # Severity 0.0–1.0
+    # ------------------------
+    severity_raw = 0.0
+
+    # Baseline per risk type.
+    if "docker_user_daemon_access" in risk_categories:
+        severity_raw += 0.6
+    if "docker_socket_world_writable" in risk_categories:
+        severity_raw += 0.7
+    if "docker_socket_group_writable" in risk_categories:
+        severity_raw += 0.4
+    if "docker_socket_in_container" in risk_categories:
+        severity_raw += 0.6
+    if "docker_escape_surface" in risk_categories or "container_escape_surface" in risk_categories:
+        severity_raw += 0.5
+
+    # Clamp base if nothing was set.
+    if severity_raw == 0.0:
+        severity_raw = 0.2  # mild: docker present but no obvious high-risk feature
+
+    # Normalise (roughly) into 0–1 range.
+    severity_raw = min(severity_raw, 1.0)
+
+    # Strengthen if both daemon access and container-escape-ish signals exist.
+    if "docker_user_daemon_access" in risk_categories and (
+        "docker_socket_in_container" in risk_categories
+        or "container_escape_surface" in risk_categories
+    ):
+        severity_raw = min(1.0, severity_raw + 0.2)
+
+    severity_score = round(severity_raw * 10.0, 1)
 
     if severity_score >= 8.5:
-        severity_band = "Critical"
+        severity_band: SeverityBand = "Critical"
     elif severity_score >= 6.5:
         severity_band = "High"
     elif severity_score >= 3.5:
@@ -74,200 +159,176 @@ def _docker_severity_and_confidence(
     else:
         severity_band = "Low"
 
-    # ----- Confidence -----
-    if user_has_daemon_access:
-        conf_score = 8.5
-    elif socket_world_access or socket_group_access:
-        conf_score = 7.5
+    # ------------------------
+    # Confidence 0.0–1.0
+    # ------------------------
+    conf_raw = 0.0
+    if docker_binary_present:
+        conf_raw += 0.4
+    if docker_socket_exists:
+        conf_raw += 0.4
+    if version_query_ok:
+        conf_raw += 0.2
+
+    conf_raw = min(conf_raw, 1.0)
+    confidence_score = round(conf_raw * 10.0, 1)
+
+    if confidence_score >= 8.0:
+        confidence_band = "High"
+    elif confidence_score >= 5.0:
+        confidence_band = "Medium"
     else:
-        conf_score = 5.0
+        confidence_band = "Low"
 
-    if in_container and user_has_daemon_access:
-        conf_score += 0.5  # docker-in-docker with socket mounted is usually obvious
-
-    conf_score = max(0.0, min(10.0, conf_score))
-
-    if conf_score >= 8.0:
-        conf_band = "High"
-    elif conf_score >= 5.5:
-        conf_band = "Medium"
-    else:
-        conf_band = "Low"
-
-    return (severity_score, severity_band), (conf_score, conf_band)
+    return severity_score, severity_band, confidence_score, confidence_band
 
 
 @register_module(
     key="docker_enum",
-    description="Analyse Docker daemon access and potential container escape surfaces",
+    description="Analyse Docker daemon access, socket exposure, and potential container escape surfaces",
     required_triggers=["docker_escape_surface"],
 )
 def run(state: dict, report: Report):
     """
-    Docker daemon / escape analysis module.
+    In depth Docker analysis module.
 
-    - Uses existing runtime/docker probe output (no extra docker calls required).
-    - Evaluates whether the current user can talk to the Docker daemon.
-    - Assigns high level risk categories and capabilities.
-    - Computes severity and confidence scores.
-    - Delegates narrative guidance to the central guidance engine.
+    - Uses existing runtime/docker probe output.
+    - Identifies user access to the Docker daemon and socket exposure.
+    - Assigns capability categories (platform_control, container_escape, file_read/write).
+    - Scores severity and confidence.
+    - Delegates narrative guidance to the shared guidance engine.
     """
     runtime = state.get("runtime", {}) or {}
     docker = runtime.get("docker", {}) or {}
-    user = state.get("user", {}) or {}
-    container = runtime.get("container", {}) or {}
 
-    if not docker or not docker.get("binary_present"):
+    # If docker isn't even present, don't spam.
+    if not docker.get("binary_present") and not docker.get("socket_exists"):
         report.add_section(
             "Docker Analysis",
             [
-                "Docker CLI or daemon information not present in state.",
-                "Either Docker is not installed, not in PATH, or the Docker probe did not run.",
+                "Docker CLI and Docker socket both appear to be absent on this host.",
+                "No Docker-related privilege escalation surface was detected by the current probes.",
             ],
         )
         return
 
-    socket_path = docker.get("socket_path")
-    socket_exists = docker.get("socket_exists", False)
-    socket_mode = docker.get("socket_mode") or ""
-    socket_owner = docker.get("socket_owner")
-    socket_group = docker.get("socket_group")
-    version = docker.get("version")
-    version_query_ok = docker.get("version_query_ok", False)
+    risk_categories = _docker_risk_categories(state)
+    capabilities = _docker_capabilities_from_risk(risk_categories)
 
-    in_container = bool(container.get("in_container"))
-    user_in_docker = _user_in_docker_group(user)
-
-    world_access, group_access = _socket_world_group_bits(socket_mode) if socket_mode else (False, False)
-
-    # Very coarse: if user is in docker group and socket exists, assume they can talk to daemon.
-    user_has_daemon_access = bool(user_in_docker and socket_exists)
-
-    # Capabilities from this context.
-    capabilities: Set[str] = set()
-    if user_has_daemon_access:
-        capabilities.add("platform_control")
-        capabilities.add("file_read")
-        capabilities.add("file_write")
-    if in_container and socket_exists:
-        capabilities.add("container_escape")
-
-    # Risk categories.
-    risk_categories: Set[str] = set()
-    if user_has_daemon_access:
-        risk_categories.add("docker_user_daemon_access")
-    if in_container and socket_exists:
-        risk_categories.add("docker_socket_in_container")
-    if world_access:
-        risk_categories.add("docker_socket_world_writable")
-    if group_access:
-        risk_categories.add("docker_socket_group_writable")
-    if docker.get("error") is None and docker.get("version"):
-        # Very rough: treat anything that looks like rootless as a separate note.
-        if "rootless" in str(docker.get("version")).lower():
-            risk_categories.add("docker_rootless_daemon")
-
-    (severity_score, severity_band), (conf_score, conf_band) = _docker_severity_and_confidence(
-        user_has_daemon_access=user_has_daemon_access,
-        in_container=in_container,
-        socket_world_access=world_access,
-        socket_group_access=group_access,
+    severity_score, severity_band, confidence_score, confidence_band = _docker_severity_and_confidence(
+        risk_categories, state
     )
 
-    # Build a single high-level finding for this host/user.
-    descriptor_parts: List[str] = []
-    if user_has_daemon_access:
-        if in_container:
-            descriptor_parts.append("Container user has access to host Docker daemon")
-        else:
-            descriptor_parts.append("Host user has access to Docker daemon")
-    elif socket_exists:
-        descriptor_parts.append("Docker socket present but user access unclear")
-    else:
-        descriptor_parts.append("Docker CLI present; daemon/socket not detected")
+    socket_path = docker.get("socket_path") or "/var/run/docker.sock"
+    socket_mode = docker.get("socket_mode")
+    socket_owner = docker.get("socket_owner")
+    socket_group = docker.get("socket_group")
+    in_container = (runtime.get("container", {}) or {}).get("in_container", False)
+    in_docker_group = state.get("user", {}).get("in_docker_group", False) or state.get(
+        "triggers", {}
+    ).get("in_docker_group", False)
 
-    descriptor = "; ".join(descriptor_parts)
+    # Build a single high-level finding representing docker daemon surface.
+    rule_desc = f"Docker daemon reachable via socket {socket_path}" if docker.get(
+        "socket_exists"
+    ) else "Docker CLI present without confirmed daemon/socket access"
 
-    finding = {
+    # Build guidance context (surface="docker") – this is the only place
+    # docker_enum needs to think about prose now.
+    ctx: FindingContext = {
         "surface": "docker",
-        "rule": descriptor,
-        "binary": "docker",
+        "rule": rule_desc,
+        "binary": "docker" if docker.get("binary_present") else None,
         "capabilities": capabilities,
         "risk_categories": risk_categories,
         "severity_band": severity_band,
         "severity_score": severity_score,
-        "nopasswd": False,  # sudo-specific; unused here but kept for uniformity
+        "nopasswd": False,  # not relevant for docker, but field exists
         "gtfobins_url": None,
         "metadata": {
             "socket_path": socket_path,
-            "socket_exists": socket_exists,
             "socket_mode": socket_mode,
             "socket_owner": socket_owner,
             "socket_group": socket_group,
-            "docker_version": version,
-            "version_query_ok": version_query_ok,
             "in_container": in_container,
-            "user_in_docker_group": user_in_docker,
+            "in_docker_group": in_docker_group,
         },
-        "confidence_score": conf_score,
-        "confidence_band": conf_band,
     }
 
-    # ---- Analysis section (raw facts + scoring) ----
-    analysis_lines: List[str] = []
-    analysis_lines.append("This section analyses Docker daemon access and potential container escape surfaces.")
-    analysis_lines.append("No containers are started or modified by Nullpeas; it reasons about risk only.")
-    analysis_lines.append("Severity reflects potential impact if abused, confidence reflects how likely this access is usable on this host.")
-    analysis_lines.append("")
-    analysis_lines.append("### Docker environment snapshot")
-    analysis_lines.append(f"- Docker CLI present          : {bool(docker.get('binary_present'))}")
-    analysis_lines.append(f"- Docker version query OK     : {version_query_ok}")
-    analysis_lines.append(f"- Reported Docker version     : {version or 'unknown'}")
-    analysis_lines.append(f"- Socket path                 : {socket_path or 'unknown'}")
-    analysis_lines.append(f"- Socket exists               : {socket_exists}")
-    analysis_lines.append(f"- Socket mode                 : {socket_mode or 'unknown'}")
-    analysis_lines.append(f"- Socket owner (uid)          : {socket_owner}")
-    analysis_lines.append(f"- Socket group (gid)          : {socket_group}")
-    analysis_lines.append(f"- User in 'docker' group      : {user_in_docker}")
-    analysis_lines.append(f"- Running inside container    : {in_container}")
-    analysis_lines.append("")
-    analysis_lines.append("### Evaluated daemon access")
-    analysis_lines.append(f"- Descriptor       : {descriptor}")
-    analysis_lines.append(f"- Severity         : {severity_band} ({severity_score}/10)")
-    analysis_lines.append(f"- Confidence       : {conf_band} ({conf_score}/10)")
+    guidance = build_guidance(ctx)
+
+    # ------------------------------------------------------------------
+    # Docker Analysis section (summary, facts, scoring)
+    # ------------------------------------------------------------------
+    lines: List[str] = []
+
+    lines.append(
+        "This section analyses Docker-related privilege surfaces observed by Nullpeas."
+    )
+    lines.append(
+        "It uses existing runtime inspection (binary presence, version checks, and socket metadata) "
+        "and does not start or modify any containers."
+    )
+    lines.append("Severity reflects potential impact if abused; confidence reflects how likely")
+    lines.append("the described surface is actually usable on this host based on current probes.")
+    lines.append("")
+
+    lines.append("### Docker daemon and socket summary")
+    lines.append(f"- Docker CLI present          : {docker.get('binary_present')}")
+    lines.append(f"- Version query OK            : {docker.get('version_query_ok')}")
+    lines.append(f"- Reported version            : {docker.get('version')}")
+    lines.append(f"- Docker socket path          : {socket_path}")
+    lines.append(f"- Docker socket exists        : {docker.get('socket_exists')}")
+    lines.append(f"- Docker socket mode          : {socket_mode}")
+    lines.append(f"- Docker socket owner (uid)   : {socket_owner}")
+    lines.append(f"- Docker socket group (gid)   : {socket_group}")
+    lines.append(f"- Running inside container    : {in_container}")
+    lines.append(f"- User in docker group        : {in_docker_group}")
+    lines.append("")
+
+    lines.append("### Assessed Docker attack surface")
+    lines.append(f"- Rule description            : {rule_desc}")
+    lines.append(f"- Severity                    : {severity_band} ({severity_score}/10)")
+    lines.append(f"- Confidence                  : {confidence_band} ({confidence_score}/10)")
     if capabilities:
-        analysis_lines.append(f"- Capabilities     : {', '.join(sorted(capabilities))}")
+        lines.append(
+            f"- Capability tags             : {', '.join(sorted(capabilities))}"
+        )
     if risk_categories:
-        analysis_lines.append(f"- Risk categories  : {', '.join(sorted(risk_categories))}")
-    analysis_lines.append("")
+        lines.append(
+            f"- Risk categories             : {', '.join(sorted(risk_categories))}"
+        )
+    lines.append("")
 
-    report.add_section("Docker Analysis", analysis_lines)
+    report.add_section("Docker Analysis", lines)
 
-    # ---- Attack chain section (guided reasoning via core.guidance) ----
-    guidance = build_guidance(finding)  # type: ignore[arg-type]
-
+    # ------------------------------------------------------------------
+    # Docker Attack Chains section (driven by guidance engine)
+    # ------------------------------------------------------------------
     chain_lines: List[str] = []
+
     chain_lines.append(
-        "This section describes high level attack chains based on Docker daemon access."
+        "This section describes high level attack chains based on Docker-related configuration and access."
     )
     chain_lines.append(
-        "Nullpeas does not interact with the Docker daemon. It describes what an operator or attacker could do, and how defenders can respond."
+        "Nullpeas does not start or modify containers, and does not execute any of the described actions."
     )
+    chain_lines.append("They illustrate how operators or attackers might reason about this surface,")
+    chain_lines.append("and how defenders can respond.")
     chain_lines.append("")
 
-    chain_lines.append("### docker -> platform control via daemon access")
+    chain_lines.append(f"### docker -> daemon -> workload control")
     chain_lines.append("")
-    chain_lines.append("Descriptor:")
-    chain_lines.append(f"- {descriptor}")
+    chain_lines.append("Rule:")
+    chain_lines.append(f"- {rule_desc}")
     chain_lines.append("")
     chain_lines.append("Severity:")
     chain_lines.append(f"- {severity_band} ({severity_score}/10)")
     chain_lines.append("")
 
-    caps = finding["capabilities"]
-    if caps:
+    if capabilities:
         chain_lines.append("Capabilities:")
-        chain_lines.append(f"- {', '.join(sorted(caps))}")
+        chain_lines.append(f"- {', '.join(sorted(capabilities))}")
         chain_lines.append("")
 
     nav = guidance.get("navigation") or []
