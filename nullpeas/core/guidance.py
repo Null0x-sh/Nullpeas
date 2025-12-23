@@ -1,5 +1,3 @@
-# nullpeas/core/guidance.py
-
 from typing import Dict, Any, List, Optional, Set, Literal, TypedDict
 
 
@@ -256,4 +254,160 @@ def _sudo_navigation_from_capabilities(caps: Set[str]) -> List[str]:
         )
 
     # De-duplicate, preserve order.
-    se
+    seen = set()
+    deduped: List[str] = []
+    for line in lines:
+        if line not in seen:
+            seen.add(line)
+            deduped.append(line)
+
+    return deduped
+
+
+def _sudo_offensive_from_nopasswd(nopasswd: bool) -> List[str]:
+    steps: List[str] = []
+    steps.append(
+        "From the compromised user, confirm that sudo is available and that this rule applies."
+    )
+
+    if nopasswd:
+        steps.append(
+            "Use sudo to run this allowed binary without needing a password."
+        )
+    else:
+        steps.append(
+            "Use sudo to run this allowed binary, providing credentials if engagement rules allow."
+        )
+
+    steps.append(
+        "Within the elevated execution context of this binary, explore features that align with its capabilities "
+        "to achieve privileged goals (for example, running system commands, reading sensitive files, or writing "
+        "to configuration or service files)."
+    )
+
+    steps.append(
+        "From that privileged context, perform post escalation actions such as data access, configuration inspection, "
+        "or further lateral movement, within the bounds of the engagement."
+    )
+
+    return steps
+
+
+def _sudo_defensive_from_risk(
+    risk_categories: Set[str],
+    nopasswd: bool,
+    metadata: Dict[str, Any],
+) -> List[str]:
+    actions: List[str] = []
+    actions.append(
+        "Review why this binary is allowed under sudo for this user or group, and whether that access is still required."
+    )
+    actions.append(
+        "If only a narrow operation is required, replace general purpose tools with tightly scoped helpers."
+    )
+
+    if nopasswd:
+        actions.append(
+            "Remove NOPASSWD where possible so that privileged actions require explicit authentication."
+        )
+
+    if "sudo_editor_nopasswd" in risk_categories or "sudo_editor_rule" in risk_categories:
+        actions.append(
+            "Audit which privileged configuration or service files are routinely edited with this tool and ensure that only necessary ones remain writable."
+        )
+
+    if "sudo_interpreter_nopasswd" in risk_categories or "sudo_interpreter_rule" in risk_categories:
+        actions.append(
+            "Restrict interpreter access where possible and consider replacing broad scripting access with vetted helper scripts that implement least privilege."
+        )
+
+    if "sudo_platform_control" in risk_categories or "sudo_service_control" in risk_categories:
+        actions.append(
+            "Review all service or platform management operations performed through this rule and ensure they follow least privilege and change control."
+        )
+
+    if "sudo_exec_hook_tool" in risk_categories:
+        actions.append(
+            "Inspect where this tool is used with execution hooks or callbacks and verify that those hooks cannot be redirected to untrusted binaries or paths."
+        )
+
+    actions.append(
+        "Log and monitor sudo usage of powerful interactive tools, interpreters, exec-hook utilities, and platform control binaries."
+    )
+
+    return actions
+
+
+def _sudo_impact_from_capabilities(caps: Set[str]) -> List[str]:
+    impact: List[str] = []
+
+    if "shell_spawn" in caps or "interpreter" in caps:
+        impact.append(
+            "Likely ability to obtain a shell-like or fully programmable privileged execution context."
+        )
+    if "file_read" in caps:
+        impact.append(
+            "Potential to read files normally restricted to higher privileged users (for example credentials, keys, or sensitive configuration)."
+        )
+    if "file_write" in caps:
+        impact.append(
+            "Potential to modify configuration, service, or other important files with elevated privileges, enabling persistence or further compromise."
+        )
+    if "platform_control" in caps:
+        impact.append(
+            "Ability to control services, containers, or platform components that may lead to host compromise."
+        )
+
+    if not impact:
+        impact.append(
+            "Meaningful elevated operations may be possible depending on how this binary is used in the environment."
+        )
+
+    return impact
+
+
+def _sudo_operator_research(
+    binary: Optional[str],
+    risk_categories: Set[str],
+    gtfobins_url: Optional[str],
+) -> List[str]:
+    items: List[str] = []
+
+    if gtfobins_url and binary:
+        items.append(
+            f"Review the GTFOBins entry for {binary}, focusing on sections that describe sudo-based behaviour and elevated file or process control."
+        )
+
+    if "sudo_editor_nopasswd" in risk_categories or "sudo_editor_rule" in risk_categories:
+        items.extend(
+            [
+                "Identify which privileged configuration or service files this editor could realistically modify on this host.",
+                "Map potential editor-based changes to security impact: access control, authentication flows, services, and persistence mechanisms.",
+            ]
+        )
+
+    if "sudo_interpreter_nopasswd" in risk_categories or "sudo_interpreter_rule" in risk_categories:
+        items.extend(
+            [
+                "List high value privileged actions that could be scripted from this interpreter (for example copying sensitive data, provisioning new privileged accounts, or automating configuration changes).",
+                "Consider how interpreter access could chain into other privilege escalation surfaces already identified on this host.",
+            ]
+        )
+
+    if "sudo_platform_control" in risk_categories or "sudo_service_control" in risk_categories:
+        items.extend(
+            [
+                "Identify which services, containers, or workloads are managed by this tool and what their intended security boundaries are.",
+                "Assess whether new privileged workloads or services could be introduced that bypass or weaken those boundaries.",
+            ]
+        )
+
+    if "sudo_exec_hook_tool" in risk_categories:
+        items.extend(
+            [
+                "Review which execution hooks or callbacks this tool supports and how they behave when invoked under sudo.",
+                "Consider how those hooks could interact with existing files, directories, or services on this host to change control flow.",
+            ]
+        )
+
+    return items
