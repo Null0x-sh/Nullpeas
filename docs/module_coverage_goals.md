@@ -1,5 +1,6 @@
 # Nullpeas Future Module Coverage
-This document defines **what all future Nullpeas modules must eventually cover** in order to rival (and surpass) linPEAS in practical offensive capability — while retaining Nullpeas core traits:
+
+This document defines what all future Nullpeas modules must eventually cover in order to rival (and surpass) linPEAS in practical offensive capability, while retaining Nullpeas core traits:
 
 - Low noise and stealth-first
 - Intelligence and reasoning-driven
@@ -7,294 +8,176 @@ This document defines **what all future Nullpeas modules must eventually cover**
 - Professional and report-usable
 - Offensive truth, not corporate caution
 
-Current modules are **too conservative**.  
-Future modules must assume an **attacker mindset** first.
+Current modules are intentionally conservative. Future modules must assume an attacker mindset first.
 
 ---
 
-## Philosophy for Coverage
+## 1. Philosophy for Coverage
+
 Coverage is the reason linPEAS dominates.
 
 Nullpeas modules must aggressively enumerate every realistic local privilege escalation surface, BUT:
 
 - Without blasting the host
 - Without dumping everything blindly
-- Without being afraid to call a system “basically owned”
-- With the ability to translate findings into **exploit primitives**
+- Without being afraid to call a system "basically owned"
+- With the ability to translate findings into exploit primitives
 - With enough structure to fuel the chaining engine
 
 If linPEAS finds it, Nullpeas must:
-1) Know it exists
-2) Interpret it better
-3) Place it in an attack chain
-4) Present it like a real operator would think
+
+- Know it exists
+- Interpret it better
+- Place it in an attack chain
+- Present it like a real operator would think
 
 ---
 
-# Required Coverage Categories
+## 2. Required Coverage Categories
 
-Nullpeas modules must eventually cover and reason deeply about:
+Nullpeas modules must eventually cover and reason deeply about the following surfaces.
 
----
-
-## 1️⃣ Sudo & Privileged Command Surfaces
-Already started, but must eventually include:
-
-- Full sudoers semantics
-- NOPASSWD detection
-- restricted binary analysis
-- wildcards and argument-based abuses
-- GTFOBins offensive mapping
-- SETENV / environment abuse
-- user-controlled paths
-- sudo version CVE awareness
-- direct chain relevance
-
-Output must include offensive primitives like:
-- `root_shell_primitive`
-- `arbitrary_command_execution`
-- `arbitrary_file_write_primitive`
+### 2.1 Sudo and Privileged Command Surfaces
 
 Status: In progress  
 Goal: Offensive, chain-aware, brutally honest
 
+Must eventually include:
+
+- Full sudoers semantics
+- NOPASSWD detection
+- Restricted binary analysis
+- Wildcards and argument-based abuses
+- GTFOBins offensive mapping
+- SETENV and environment abuse
+- User-controlled paths
+- Sudo version CVE awareness
+- Direct chain relevance
+
+Output primitives should include, for example:
+
+- `root_shell_primitive`
+- `arbitrary_command_execution`
+- `arbitrary_file_write_primitive`
+
+The module must explain:
+
+- Why a given rule is escalation-prone
+- How realistic and stable the abuse is
+- How it links into other surfaces (PATH, filesystem, interpreters, services)
+
 ---
 
-## 2️⃣ SUID / SGID Escalation Surfaces
-Must enumerate and reason like linPEAS but cleaner:
+### 2.2 SUID / SGID Escalation Surfaces
 
-- list privileged SUID / SGID binaries
-- detect exploitable SUIDs
+Must enumerate and reason like linPEAS, but cleaner and quieter:
+
+- List privileged SUID / SGID binaries
+- Detect exploitable SUIDs
 - GTFOBins awareness
-- dangerous legacy binaries
-- non-standard privilege boundaries
-- writable SUID chain escalation
-- binary validation and existence checks
-- distinguish:
-  - “instant root shell”
-  - “file write primitive”
-  - “indirect escalation”
+- Dangerous legacy binaries
+- Non-standard privilege boundaries
+- Writable SUID-based chain escalation
+- Binary validation and existence checks
 
 Output primitives:
+
 - `suid_shell_spawn`
 - `suid_file_write`
 - `suid_environment_abuse`
 
-Must explain:
-- reliability
-- OPSEC noise
-- realism
+Each primitive must describe:
+
+- Reliability (how likely it is to work)
+- OPSEC noise (how visible it is)
+- Realism (would a real attacker actually use this)
 
 ---
 
-## 3️⃣ PATH Hijacking & Execution Flow Abuse
-Critical for serious offensive parity:
+### 2.3 PATH Hijacking and Execution Flow Abuse
+
+Critical for serious offensive parity.
 
 Must detect:
-- writable directories in PATH
+
+- Writable directories in `PATH`
 - PATH order weaknesses
-- predictable PATH hijack chains
-- PATH combined with sudo
-- shadowed binaries
+- Predictable PATH hijack chains
+- PATH issues combined with sudo
+- Shadowed binaries
 
 Should identify clear attacker opportunities:
-- execution replacement
-- privilege inheritance chaining
+
+- Execution replacement
+- Privilege inheritance chaining
 
 Output primitives:
+
 - `path_hijack_primitive`
 - `binary_shadow_primitive`
 
 ---
 
-## 4️⃣ Capabilities Abuse
-Linux capabilities are serious escalation surfaces.
+### 2.4 Capabilities Abuse
+
+Linux capabilities are serious escalation surfaces and must not be treated as a niche curiosity.
 
 Must cover:
-- CAP_SYS_ADMIN heavy abuse awareness
-- dangerous capability assignments
-- practical escalation mapping
-- real-world exploitability signals
+
+- `CAP_SYS_ADMIN` heavy abuse awareness
+- Dangerous capability assignments
+- Practical escalation mapping
+- Real-world exploitability signals
 
 Output primitives:
+
 - `capability_privilege_boundary_break`
 - `capability_shell_primitive`
 - `capability_platform_control`
 
-Must be explained offensively, not academically.
+These must be explained offensively, not academically.
 
 ---
 
-## 5️⃣ Cron / Scheduled Execution Abuse
-Must be far more serious than conservative checks:
+### 2.5 Cron and Scheduled Execution Abuse
+
+Must go beyond conservative checks.
 
 Detect:
-- root cron jobs
-- writable cron scripts
-- writable cron execution paths
-- user-owned cron executables
-- timing feasibility
-- stealth value
+
+- Root cron jobs
+- Writable cron scripts
+- Writable cron execution paths
+- User-owned cron executables that affect privileged contexts
+- Timing feasibility (how soon and how often)
+- Stealth value (how noisy execution is in practice)
 
 Output primitives:
+
 - `cron_exec_primitive`
 - `cron_timed_execution`
 - `cron_persistence_primitive`
 
 Offensive expectations:
-- delayed but guaranteed execution paths
-- persistence evaluation
+
+- Delayed but guaranteed execution paths
+- Persistence evaluation and quality
+- Combination with filesystem and PATH weaknesses
 
 ---
 
-## 6️⃣ Systemd / Services Misconfiguration
+### 2.6 Systemd and Service Misconfiguration
+
 Must understand:
 
-- writable systemd units
-- service privilege boundaries
-- execution order
-- reload/restart feasibility
-- realistic exploitation practicality
+- Writable systemd unit files
+- Service privilege boundaries
+- Execution order and reload / restart feasibility
+- Realistic exploitation practicality
 
 Output primitives:
+
 - `service_hijack_primitive`
 - `persistent_root_execution`
 
-Combined with sudo / filesystem leads to lethal chains.
-
----
-
-## 7️⃣ Docker / Containers / Virtualization Escape
-Must realistically evaluate:
-
-- docker group membership
-- socket access
-- sudo + docker access
-- LXC / LXD escape feasibility
-- container vs host awareness
-- break out risk assessment
-
-This is often:
-> “Basically root”
-
-Output primitives:
-- `docker_host_takeover`
-- `lxd_escape_primitive`
-- `container_breakout_surface`
-
-Noise, reliability, and real-world severity must be explicitly stated.
-
----
-
-## 8️⃣ Filesystem Weakness & Misconfig Privileges
-Must discover offensive opportunities:
-
-- world-writable sensitive files
-- writable configuration files
-- shadow-adjacent abuse opportunities
-- log file privilege pivot
-- library preload paths
-- socket exploitation pivots
-
-Output primitives:
-- `arbitrary_file_write`
-- `privileged_file_overwrite`
-- `library_hijack_surface`
-
-Must integrate with sudo / cron / systemd / PATH.
-
----
-
-## 9️⃣ Kernel Exploit Surfaces (Explain-Only)
-Nullpeas will:
-
-- detect exploitable kernel ranges
-- map to known escalation vectors
-- distinguish realistic from fantasy
-- never run exploits
-
-Output primitives:
-- `kernel_exploit_surface`
-
-But will honestly say:
-
-- stability risk
-- potential system crash
-- noise level
-- reality of modern mitigations
-
----
-
-## 🔟 Credential & Secret Prize Hunting
-Must discover exploitable advantages:
-
-- SSH keys exposure
-- readable private keys
-- cached credentials
-- auth tokens
-
-Output primitives:
-- `credential_loot`
-- `pivot_potential`
-
-This is critical for lateral movement and staging chains.
-
----
-
-# Coverage Expectations Per Module
-Every future module must:
-
-### Must Do
-- enumerate its surface as completely as safely possible
-- identify potential offensive exploitation primitives
-- calculate:
-  - exploitability
-  - stability risk
-  - OPSEC noise
-- feed primitives to chaining engine
-- provide dual narrative:
-  - blunt offensive truth
-  - defender remediation
-
-### Must NOT Do
-- execute exploits
-- modify system state
-- create persistence
-- deploy payloads
-- be loud for no reason
-
----
-
-# Alignment With Offensive Engine
-Every module ultimately exists to support:
-
-- `chaining_engine.py`
-- offensive reporting engine
-
-Meaning modules must output intelligence in a structured way that can combine realistically into:
-
-- root shell chains
-- persistence chains
-- privilege boundary breaks
-- takeover scenarios
-- “this host is basically lost” results
-
----
-
-# Ultimate Goal
-Nullpeas should become:
-
-- trusted by red teamers
-- valued by defenders
-- respected professionally
-- chain-oriented
-- brutally honest
-- quietly powerful
-- offensively aligned
-- without ever actually deploying an exploit
-
-This coverage path ensures Nullpeas eventually becomes a viable primary offensive assessment engine, not just a “nice assistant.”
-
-We are no longer conservative.
-
-Nullpeas is evolving into the **pre-exploit brain we wish existed**.
+These must combine with sudo, filesystem
