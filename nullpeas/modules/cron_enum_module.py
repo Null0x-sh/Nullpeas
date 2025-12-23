@@ -467,4 +467,87 @@ def run(state: dict, report: Report):
         or any_group_writable_spool
     ):
         capabilities.add("file_write")
-    if user_crontab_ok or nonroot
+    if user_crontab_ok or nonroot_spool > 0:
+        capabilities.add("persistence")
+
+    # Risk categories.
+    risk_categories: Set[str] = set()
+    if root_system > 0:
+        risk_categories.add("cron_root_system_files")
+    if nonroot_system > 0:
+        risk_categories.add("cron_nonroot_system_files")
+    if root_spool > 0:
+        risk_categories.add("cron_root_spool_files")
+    if nonroot_spool > 0:
+        risk_categories.add("cron_nonroot_spool_files")
+    if any_world_writable_system:
+        risk_categories.add("cron_system_file_world_writable")
+    if any_group_writable_system:
+        risk_categories.add("cron_system_file_group_writable")
+    if any_world_writable_spool:
+        risk_categories.add("cron_spool_file_world_writable")
+    if any_group_writable_spool:
+        risk_categories.add("cron_spool_file_group_writable")
+    if user_crontab_ok:
+        risk_categories.add("cron_user_crontab_present")
+    if classification["any_root_system_world_writable"]:
+        risk_categories.add("cron_root_system_world_writable")
+    if classification["any_root_system_group_writable"]:
+        risk_categories.add("cron_root_system_group_writable")
+
+    (severity_score, severity_band), (conf_score, conf_band) = _cron_severity_and_confidence(
+        classification=classification,
+        user_crontab_ok=user_crontab_ok,
+    )
+
+    # Build a high-level descriptor.
+    descriptor_parts: List[str] = []
+    if root_system > 0:
+        descriptor_parts.append(f"{root_system} root-owned system cron file(s) under /etc/cron.* or /etc/crontab")
+    if nonroot_system > 0:
+        descriptor_parts.append(f"{nonroot_system} non-root-owned system cron file(s) under /etc/cron.* or /etc/crontab")
+    if root_spool > 0:
+        descriptor_parts.append(f"{root_spool} root-owned cron spool file(s) under /var/spool/cron*")
+    if nonroot_spool > 0:
+        descriptor_parts.append(f"{nonroot_spool} non-root cron spool file(s) under /var/spool/cron*")
+    if user_crontab_ok:
+        descriptor_parts.append(f"Per-user crontab present for {user.get('name', 'this account')}")
+
+    if not descriptor_parts:
+        descriptor_parts.append("Cron configuration present but no clear escalation-prone patterns identified")
+
+    descriptor = "; ".join(descriptor_parts)
+
+    finding: FindingContext = {
+        "surface": "cron",
+        "rule": descriptor,
+        "binary": None,
+        "capabilities": capabilities,
+        "risk_categories": risk_categories,
+        "severity_band": severity_band,          # type: ignore[assignment]
+        "severity_score": severity_score,
+        "nopasswd": False,
+        "gtfobins_url": None,
+        "metadata": {
+            "files_metadata": files_meta,
+            "classification": classification,
+            "user_crontab_status": user_cron_status,
+            "user_name": user.get("name"),
+        },
+    }
+
+    # ---- Analysis section (raw facts + scoring) ----
+    lines: List[str] = []
+    lines.append("This section analyses cron configuration and scheduled execution surfaces observed by Nullpeas.")
+    lines.append("It uses existing cron probe output (paths, ownership, permissions) and does not modify any jobs.")
+    lines.append("Severity reflects potential impact if abused; confidence reflects how likely the described surface is actually usable on this host.")
+    lines.append("")
+
+    # High-level summary
+    lines.append("### Cron summary")
+    lines.append(f"- System cron files discovered     : {len(classification['system_files'])}")
+    lines.append(f"- Root-owned system cron files     : {root_system}")
+    lines.append(f"- Non-root system cron files       : {nonroot_system}")
+    lines.append(f"- Root-owned spool cron files      : {root_spool}")
+    lines.append(f"- Non-root spool cron files        : {nonroot_spool}")
+    lines.append(f"- Any world-writable system files  : {any_world_writable_system}")
