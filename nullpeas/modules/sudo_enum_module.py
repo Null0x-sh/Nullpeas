@@ -1,4 +1,5 @@
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Tuple
+import re
 
 from nullpeas.core.exec import run_command
 from nullpeas.core.report import Report
@@ -40,6 +41,34 @@ GTF0BINS_SUDO_HINTS: Dict[str, List[str]] = {
     "docker": [
         "Container management tool that can often be leveraged to escape into the host when misconfigured.",
     ],
+    "systemctl": [
+        "Service and platform control tool that can manage systemd units and privileged services.",
+    ],
+}
+
+
+# Direct mapping from binary name to GTFOBins URL, used as an external reference only.
+GTF0BINS_URLS: Dict[str, str] = {
+    "vim": "https://gtfobins.github.io/gtfobins/vim/",
+    "vi": "https://gtfobins.github.io/gtfobins/vi/",
+    "nano": "https://gtfobins.github.io/gtfobins/nano/",
+    "ed": "https://gtfobins.github.io/gtfobins/ed/",
+    "less": "https://gtfobins.github.io/gtfobins/less/",
+    "more": "https://gtfobins.github.io/gtfobins/more/",
+    "man": "https://gtfobins.github.io/gtfobins/man/",
+    "python": "https://gtfobins.github.io/gtfobins/python/",
+    "python3": "https://gtfobins.github.io/gtfobins/python/",
+    "perl": "https://gtfobins.github.io/gtfobins/perl/",
+    "ruby": "https://gtfobins.github.io/gtfobins/ruby/",
+    "lua": "https://gtfobins.github.io/gtfobins/lua/",
+    "find": "https://gtfobins.github.io/gtfobins/find/",
+    "tar": "https://gtfobins.github.io/gtfobins/tar/",
+    "awk": "https://gtfobins.github.io/gtfobins/awk/",
+    "rsync": "https://gtfobins.github.io/gtfobins/rsync/",
+    "bash": "https://gtfobins.github.io/gtfobins/bash/",
+    "sh": "https://gtfobins.github.io/gtfobins/sh/",
+    "docker": "https://gtfobins.github.io/gtfobins/docker/",
+    "systemctl": "https://gtfobins.github.io/gtfobins/systemctl/",
 }
 
 
@@ -139,7 +168,7 @@ def _parse_sudo_rules(raw_stdout: str) -> List[Dict[str, Any]]:
       - whether a rule is NOPASSWD
       - the raw command part
       - the raw line for reporting
-      - whether the rule looks like a denial or ALL rule
+      - whether the rule looks like an ALL rule
 
     Example lines:
       (root) NOPASSWD: /usr/bin/vim
@@ -157,17 +186,29 @@ def _parse_sudo_rules(raw_stdout: str) -> List[Dict[str, Any]]:
         if not stripped.startswith("("):
             continue
 
-        # Basic fields
+        # Basic flags.
         nopasswd = "NOPASSWD:" in stripped or "NOPASSWD" in stripped
         denied = "DENIED" in stripped.upper()
 
-        # Extract the command portion after the last colon if present.
-        cmd_part = stripped
-        if ":" in stripped:
-            cmd_part = stripped.split(":", 1)[1].strip()
+        # Extract runas spec inside the first parentheses, if any.
+        runas_spec: Optional[str] = None
+        m = re.match(r"^\(([^)]+)\)\s*(.*)$", stripped)
+        rest = stripped
+        if m:
+            runas_spec = m.group(1).strip()
+            rest = m.group(2).strip()
 
-        # Some rules may end up as just "ALL"
-        command = cmd_part if cmd_part else ""
+        # Extract the command portion after the first colon, if present.
+        cmd_part = rest
+        if ":" in rest:
+            # e.g. "NOPASSWD: /usr/bin/vim" or "ALL: ALL"
+            after_colon = rest.split(":", 1)[1].strip()
+            cmd_part = after_colon if after_colon else ""
+
+        command = cmd_part
+        upper_cmd = command.strip().upper()
+
+        is_all_rule = upper_cmd in {"ALL", "ALL ALL"}
 
         rules.append(
             {
@@ -175,6 +216,8 @@ def _parse_sudo_rules(raw_stdout: str) -> List[Dict[str, Any]]:
                 "nopasswd": nopasswd,
                 "denied": denied,
                 "command": command,
+                "runas_spec": runas_spec,
+                "is_all_rule": is_all_rule,
             }
         )
 
@@ -202,8 +245,9 @@ def _verify_binary_available(name: str) -> Dict[str, Any]:
         resolved = run_command(f"which {name}")
 
     if resolved:
+        resolved = resolved.strip()
         result["exists_in_path"] = True
-        result["resolved_path"] = resolved.strip()
+        result["resolved_path"] = resolved
 
         # Try a harmless version/help probe.
         for arg in ["--version", "-V", "-h", "--help"]:
@@ -215,37 +259,136 @@ def _verify_binary_available(name: str) -> Dict[str, Any]:
     return result
 
 
+def _risk_categories_for_rule(
+    nopasswd: bool,
+    base: str,
+    is_all_rule: bool,
+) -> Set[str]:
+    """
+    Assign high level risk categories based on the rule and binary.
+    These drive scoring and reporting, but do not generate exploits.
+    """
+    cats: Set[str] = set()
+
+    if is_all_rule:
+        if nopasswd:
+            cats.add("sudo_global_nopasswd_all")
+        else:
+            cats.add("sudo_global_all")
+        return cats
+
+    if not base:
+        return cats
+
+    # Editors
+    if base in {"vim", "vi", "nano", "ed"}:
+        cats.add("sudo_editor_nopasswd" if nopasswd else "sudo_editor_rule")
+
+    # Interpreters
+    if base in {"python", "python3", "perl", "ruby", "lua"}:
+        cats.add("sudo_interpreter_nopasswd" if nopasswd else "sudo_interpreter_rule")
+
+    # Service / platform control
+    if base in {"systemctl"}:
+        cats.add("sudo_service_control")
+    if base in {"docker"}:
+        cats.add("sudo_platform_control")
+
+    # Exec-hook style tools
+    if base in {"find", "awk", "rsync", "tar"}:
+        cats.add("sudo_exec_hook_tool")
+
+    return cats
+
+
 def _severity_for_rule(
     nopasswd: bool,
     binary_info: Dict[str, Any],
     has_gtfobins_hint: bool,
     capabilities: Set[str],
     is_all_rule: bool,
-) -> str:
+    risk_categories: Set[str],
+) -> Tuple[float, str]:
     """
-    Rough severity scoring.
+    Numeric severity scoring + band.
 
-    This is not meant to be perfect, just sensible:
-      - NOPASSWD: ALL -> critical
-      - NOPASSWD + shell spawn / interpreter / platform control -> high
-      - NOPASSWD + other interesting caps or GTFO hint -> medium
-      - everything else -> low
+    - Global NOPASSWD: ALL => 10.0 (Critical)
+    - NOPASSWD + dangerous capabilities (shell, interpreter, platform_control) => high
+    - Presence of escalation-prone capabilities or GTFOBins hint => medium+
+    - Otherwise low.
     """
+    # Global ALL style.
     if is_all_rule and nopasswd:
-        return "critical"
+        return 10.0, "Critical"
 
     exists = binary_info.get("exists_in_path", False)
 
-    if nopasswd and exists:
-        if "shell_spawn" in capabilities or "interpreter" in capabilities or "platform_control" in capabilities:
-            return "high"
-        if capabilities or has_gtfobins_hint:
-            return "medium"
+    # Base severity components (0.0–1.0)
+    auth_factor = 1.0 if nopasswd else 0.4
+    scope_factor = 0.8 if is_all_rule else 0.5
 
-    if exists and (capabilities or has_gtfobins_hint):
-        return "medium"
+    class_factor = 0.0
+    if {"shell_spawn", "interpreter", "platform_control"} & capabilities:
+        class_factor = 1.0
+    elif capabilities:
+        class_factor = 0.6
+    elif has_gtfobins_hint:
+        class_factor = 0.5
 
-    return "low"
+    # If binary does not exist, tone down slightly.
+    existence_factor = 1.0 if exists else 0.6
+
+    # Risk categories can boost slightly.
+    cat_boost = 0.0
+    if "sudo_editor_nopasswd" in risk_categories or "sudo_interpreter_nopasswd" in risk_categories:
+        cat_boost = 0.2
+
+    severity_raw = (
+        0.25 * auth_factor
+        + 0.20 * scope_factor
+        + 0.40 * class_factor
+        + 0.15 * existence_factor
+        + cat_boost
+    )
+    # clamp 0.0–1.0
+    severity_raw = max(0.0, min(1.0, severity_raw))
+    score = round(severity_raw * 10.0, 1)
+
+    if score >= 8.5:
+        band = "Critical"
+    elif score >= 6.5:
+        band = "High"
+    elif score >= 3.5:
+        band = "Medium"
+    else:
+        band = "Low"
+
+    return score, band
+
+
+def _confidence_for_rule(
+    binary_info: Dict[str, Any],
+    is_all_rule: bool,
+) -> Tuple[float, str]:
+    """
+    Confidence that this rule is actually usable on this host.
+
+    Very simple initial model:
+    - ALL-style rules: high confidence
+    - Otherwise based on existence and version check.
+    """
+    if is_all_rule:
+        return 9.5, "High"
+
+    exists = binary_info.get("exists_in_path", False)
+    version_ok = binary_info.get("version_check_ok", False)
+
+    if exists and version_ok:
+        return 8.0, "High"
+    if exists:
+        return 6.0, "Medium"
+
+    return 3.0, "Low"
 
 
 def _build_navigation_guidance(capabilities: Set[str]) -> List[str]:
@@ -273,8 +416,8 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     chains: List[Dict[str, Any]] = []
 
     for f in findings:
-        severity = f["severity"]
-        if severity not in {"critical", "high", "medium"}:
+        severity_band = f["severity_band"]
+        if severity_band not in {"Critical", "High", "Medium"}:
             continue
 
         rule = f["raw_rule"]
@@ -290,10 +433,11 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     "title": "sudo -> full passwordless root access",
                     "rule": rule,
                     "binary": None,
-                    "severity": severity,
+                    "severity_band": severity_band,
+                    "severity_score": f["severity_score"],
                     "capabilities": {"shell_spawn", "file_read", "file_write", "platform_control"},
                     "offensive_steps": [
-                        "Confirm that sudo is usable from the current user and that this rule applies.",
+                        "Confirm that sudo is usable from the current user and that this broad rule applies.",
                         "Use sudo to invoke a preferred shell or administrative tool with elevated privileges.",
                         "From the elevated context, perform further actions such as reading or modifying sensitive files, "
                         "changing configuration, or establishing persistence, subject to engagement scope."
@@ -308,6 +452,7 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                         "Effective full root level capabilities from the affected account.",
                         "High potential for system wide compromise and stealthy persistence if left unaddressed."
                     ],
+                    "gtfobins_url": None,
                 }
             )
             continue
@@ -363,6 +508,7 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         defensive_actions.append(
             "Log and monitor sudo usage of powerful interactive tools, interpreters, or platform control binaries."
         )
+        defensive_actions.append(prereq_binary_desc)
 
         impact: List[str] = []
         if "shell_spawn" in caps or "interpreter" in caps:
@@ -391,11 +537,13 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                 "title": title,
                 "rule": rule,
                 "binary": binary,
-                "severity": severity,
+                "severity_band": severity_band,
+                "severity_score": f["severity_score"],
                 "capabilities": caps,
                 "offensive_steps": offensive_steps,
                 "defensive_actions": defensive_actions,
                 "impact": impact,
+                "gtfobins_url": f.get("gtfobins_url"),
             }
         )
 
@@ -412,9 +560,10 @@ def run(state: dict, report: Report):
     In depth sudo analysis module.
 
     - Uses existing sudo probe output (no extra sudo -l calls).
-    - Parses rules for NOPASSWD and GTFOBins like candidates.
+    - Parses rules for NOPASSWD and escalation prone binaries.
     - Assigns capability categories for known binaries.
     - Quietly verifies candidate binaries exist and can execute basic probes.
+    - Computes severity and confidence scores.
     - Builds high level attack chains with offensive and defensive viewpoints.
     - Writes human readable sections into the report.
     """
@@ -448,13 +597,12 @@ def run(state: dict, report: Report):
         cmd = r.get("command", "") or ""
         raw_rule = r["raw"]
         nopasswd = r.get("nopasswd", False)
-
-        # Identify ALL style rules where no specific binary is listed.
-        is_all_rule = cmd.strip().upper() == "ALL" or cmd.strip().upper() == "ALL ALL"
+        is_all_rule = r.get("is_all_rule", False)
 
         base = _command_basename(cmd) if not is_all_rule else ""
         gtfobins_hint = GTF0BINS_SUDO_HINTS.get(base)
         capabilities = GTF0BINS_CAPABILITIES.get(base, set()) if base else set()
+        risk_categories = _risk_categories_for_rule(nopasswd, base, is_all_rule)
 
         if base:
             bin_info = _verify_binary_available(base)
@@ -466,13 +614,20 @@ def run(state: dict, report: Report):
                 "version_check_ok": False,
             }
 
-        severity = _severity_for_rule(
+        severity_score, severity_band = _severity_for_rule(
             nopasswd=nopasswd,
             binary_info=bin_info,
             has_gtfobins_hint=(gtfobins_hint is not None),
             capabilities=capabilities,
             is_all_rule=is_all_rule,
+            risk_categories=risk_categories,
         )
+        confidence_score, confidence_band = _confidence_for_rule(
+            binary_info=bin_info,
+            is_all_rule=is_all_rule,
+        )
+
+        gtfobins_url = GTF0BINS_URLS.get(base)
 
         findings.append(
             {
@@ -482,8 +637,13 @@ def run(state: dict, report: Report):
                 "binary_info": bin_info,
                 "has_gtfobins_hint": gtfobins_hint is not None,
                 "gtfobins_hint_lines": gtfobins_hint or [],
+                "gtfobins_url": gtfobins_url,
                 "capabilities": capabilities,
-                "severity": severity,
+                "risk_categories": risk_categories,
+                "severity_score": severity_score,
+                "severity_band": severity_band,
+                "confidence_score": confidence_score,
+                "confidence_band": confidence_band,
                 "is_all_rule": is_all_rule,
             }
         )
@@ -494,6 +654,7 @@ def run(state: dict, report: Report):
     lines.append("This section analyses the existing sudo -l output collected by Nullpeas.")
     lines.append("No additional sudo -l invocations were made by this module.")
     lines.append("It performed limited extra checks (command lookup and simple version/help probes) to confirm binaries exist and can run.")
+    lines.append("Severity reflects potential impact if abused, confidence reflects how likely the rule is usable on this host.")
     lines.append("")
 
     lines.append("### Parsed sudo rules")
@@ -501,30 +662,37 @@ def run(state: dict, report: Report):
         lines.append(f"- {f['raw_rule']}")
     lines.append("")
 
-    def _group(sev: str) -> List[Dict[str, Any]]:
-        return [f for f in findings if f["severity"] == sev]
+    def _group_by_band(band: str) -> List[Dict[str, Any]]:
+        return [f for f in findings if f["severity_band"] == band]
 
-    critical = _group("critical")
-    high = _group("high")
-    med = _group("medium")
-    low = _group("low")
+    critical = _group_by_band("Critical")
+    high = _group_by_band("High")
+    med = _group_by_band("Medium")
+    low = _group_by_band("Low")
 
     if critical:
         lines.append("### Critical sudo surfaces")
         lines.append("")
         for f in critical:
             bi = f["binary_info"]
+            caps = f["capabilities"]
             lines.append(f"- `{f['raw_rule']}`")
-            lines.append(f"  - Interpreted as a broad or highly privileged rule (for example NOPASSWD: ALL).")
             lines.append(f"  - Binary            : {f['binary']}")
             lines.append(f"  - Resolved path     : {bi.get('resolved_path')}")
             lines.append(f"  - Binary available  : {bi.get('exists_in_path')}")
+            lines.append(f"  - Executes cleanly  : {bi.get('version_check_ok')}")
             lines.append(f"  - NOPASSWD          : {f['nopasswd']}")
+            lines.append(f"  - Severity          : {f['severity_band']} ({f['severity_score']}/10)")
+            lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
+            if caps:
+                lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
+            if f["gtfobins_url"]:
+                lines.append(f"  - External reference: {f['gtfobins_url']}")
             lines.append("")
         lines.append("")
 
     if high:
-        lines.append("### High confidence escalation surfaces")
+        lines.append("### High severity sudo surfaces")
         lines.append("")
         for f in high:
             bi = f["binary_info"]
@@ -535,15 +703,17 @@ def run(state: dict, report: Report):
             lines.append(f"  - Binary available  : {bi.get('exists_in_path')}")
             lines.append(f"  - Executes cleanly  : {bi.get('version_check_ok')}")
             lines.append(f"  - NOPASSWD          : {f['nopasswd']}")
+            lines.append(f"  - Severity          : {f['severity_band']} ({f['severity_score']}/10)")
+            lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
             if caps:
                 lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
-            if f["has_gtfobins_hint"]:
-                lines.append("  - Known to have privilege escalation patterns documented publicly.")
+            if f["gtfobins_url"]:
+                lines.append(f"  - External reference: {f['gtfobins_url']}")
             lines.append("")
         lines.append("")
 
     if med:
-        lines.append("### Medium confidence surfaces")
+        lines.append("### Medium severity sudo surfaces")
         lines.append("")
         for f in med:
             bi = f["binary_info"]
@@ -554,13 +724,17 @@ def run(state: dict, report: Report):
             lines.append(f"  - Binary available  : {bi.get('exists_in_path')}")
             lines.append(f"  - Executes cleanly  : {bi.get('version_check_ok')}")
             lines.append(f"  - NOPASSWD          : {f['nopasswd']}")
+            lines.append(f"  - Severity          : {f['severity_band']} ({f['severity_score']}/10)")
+            lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
             if caps:
                 lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
+            if f["gtfobins_url"]:
+                lines.append(f"  - External reference: {f['gtfobins_url']}")
             lines.append("")
         lines.append("")
 
     if low:
-        lines.append("### Low confidence or unverified surfaces")
+        lines.append("### Low severity or unverified sudo surfaces")
         lines.append("")
         for f in low:
             bi = f["binary_info"]
@@ -571,8 +745,12 @@ def run(state: dict, report: Report):
             lines.append(f"  - Binary available  : {bi.get('exists_in_path')}")
             lines.append(f"  - Executes cleanly  : {bi.get('version_check_ok')}")
             lines.append(f"  - NOPASSWD          : {f['nopasswd']}")
+            lines.append(f"  - Severity          : {f['severity_band']} ({f['severity_score']}/10)")
+            lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
             if caps:
                 lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
+            if f["gtfobins_url"]:
+                lines.append(f"  - External reference: {f['gtfobins_url']}")
             lines.append("")
         lines.append("")
 
@@ -600,8 +778,8 @@ def run(state: dict, report: Report):
             chain_lines.append("Rule:")
             chain_lines.append(f"- `{c['rule']}`")
             chain_lines.append("")
-            chain_lines.append(f"Severity:")
-            chain_lines.append(f"- {c['severity']}")
+            chain_lines.append("Severity:")
+            chain_lines.append(f"- {c['severity_band']} ({c['severity_score']}/10)")
             chain_lines.append("")
             if binary:
                 chain_lines.append("Binary:")
@@ -641,10 +819,9 @@ def run(state: dict, report: Report):
                 chain_lines.append(f"- {imp}")
             chain_lines.append("")
 
-            # References
             refs: List[str] = []
-            if binary and binary in GTF0BINS_SUDO_HINTS:
-                refs.append(f"GTFOBins entry for {binary}: https://gtfobins.github.io/gtfobins/{binary}/")
+            if c.get("gtfobins_url"):
+                refs.append(f"GTFOBins entry for {binary}: {c['gtfobins_url']}")
 
             if refs:
                 chain_lines.append("References:")
