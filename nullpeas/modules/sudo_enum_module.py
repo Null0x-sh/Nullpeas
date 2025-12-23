@@ -157,7 +157,7 @@ def _parse_sudo_rules(raw_stdout: str) -> List[Dict[str, Any]]:
 
         # Extract runas spec inside the first parentheses, if any.
         runas_spec: Optional[str] = None
-        m = re.match(r"^([^)]+)\s*(.*)$", stripped)
+        m = re.match(r"^\(([^)]+)\)\s*(.*)$", stripped)
         rest = stripped
         if m:
             runas_spec = m.group(1).strip()
@@ -400,4 +400,206 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             },
         }
 
-        guidance = build
+        guidance = build_guidance(ctx)
+
+        chains.append(
+            {
+                "title": _title_for_sudo_chain(binary, risk_categories),
+                "rule": rule,
+                "binary": binary,
+                "severity_band": severity_band,
+                "severity_score": f["severity_score"],
+                "capabilities": caps,
+                "guidance": guidance,
+            }
+        )
+
+    return chains
+
+
+# ========================= Offensive Primitive Mapping =========================
+
+def _offensive_classification_from_band(severity_band: str) -> str:
+    if severity_band == "Critical":
+        return "catastrophic"
+    if severity_band == "High":
+        return "severe"
+    if severity_band == "Medium":
+        return "useful"
+    return "niche"
+
+
+def _primitive_from_finding(f: Dict[str, Any]) -> Optional[Primitive]:
+    """
+    Convert a sudo rule finding into an offensive primitive that the
+    global chaining engine can work with.
+    """
+    severity_band = f["severity_band"]
+    binary = f["binary"]
+    caps: Set[str] = f.get("capabilities", set()) or set()
+    risk_categories: Set[str] = f.get("risk_categories", set()) or set()
+    nopasswd = f["nopasswd"]
+    is_all_rule = f["is_all_rule"]
+    runas_spec = (f.get("runas_spec") or "").lower() if f.get("runas_spec") else ""
+    run_as = "root" if ("root" in runas_spec or "all" in runas_spec or not runas_spec) else runas_spec
+
+    # Decide primitive type
+    primitive_type: Optional[str] = None
+
+    # Global NOPASSWD: ALL => effectively full root control
+    if is_all_rule and nopasswd:
+        primitive_type = "root_shell_primitive"
+    else:
+        # Specific binary-based powers
+        if nopasswd and "shell_spawn" in caps and run_as == "root":
+            primitive_type = "root_shell_primitive"
+        elif nopasswd and "platform_control" in caps and binary == "docker":
+            primitive_type = "docker_host_takeover"
+        elif nopasswd and "file_write" in caps and run_as == "root":
+            primitive_type = "arbitrary_file_write_primitive"
+        elif {"shell_spawn", "interpreter", "platform_control"} & caps:
+            primitive_type = "arbitrary_command_execution"
+
+    if not primitive_type:
+        # For now, only emit primitives for clearly offensive surfaces.
+        return None
+
+    # Exploitability model
+    if primitive_type in {"root_shell_primitive", "docker_host_takeover"} and nopasswd:
+        exploitability = "trivial"
+    elif primitive_type == "arbitrary_file_write_primitive":
+        exploitability = "moderate"
+    else:
+        exploitability = "moderate"
+
+    # Stability model
+    if primitive_type in {"root_shell_primitive", "docker_host_takeover"}:
+        stability = "safe"
+    else:
+        stability = "moderate"
+
+    # Noise model – sudo-based activity is typically logged but not “loud”
+    noise = "low"
+
+    classification = _offensive_classification_from_band(severity_band)
+
+    confidence_score = f["confidence_score"]
+    confidence_band = f["confidence_band"]
+
+    confidence = PrimitiveConfidence(
+        score=confidence_score,
+        reason=f"Sudo rule parsed with {confidence_band} confidence, binary existence verified: {f['binary_info'].get('exists_in_path')}",
+    )
+
+    offensive_value = OffensiveValue(
+        classification=classification,
+        why=f"Sudo rule implies {primitive_type} for run_as={run_as} with severity={severity_band}.",
+    )
+
+    ctx = {
+        "rule": f["raw_rule"],
+        "binary": binary,
+        "capabilities": sorted(caps),
+        "risk_categories": sorted(risk_categories),
+        "severity_band": severity_band,
+        "severity_score": f["severity_score"],
+        "nopasswd": nopasswd,
+        "is_all_rule": is_all_rule,
+        "runas_spec": f.get("runas_spec"),
+        "gtfobins_url": f.get("gtfobins_url"),
+        "binary_info": f["binary_info"],
+    }
+
+    primitive = Primitive(
+        id=new_primitive_id("sudo", primitive_type),
+        surface="sudo",
+        type=primitive_type,
+        run_as=run_as,
+        origin_user="current_user",  # runtime probe can later refine this
+        exploitability=exploitability,
+        stability=stability,
+        noise=noise,
+        confidence=confidence,
+        offensive_value=offensive_value,
+        context=ctx,
+        conditions={
+            "requires_password": not nopasswd,
+            "requires_binary_present": True,
+        },
+        integration_flags={
+            "chaining_allowed": True,
+            "supports_persistence_extension": (primitive_type == "arbitrary_file_write_primitive"),
+            "supports_lateral_chain": False,
+        },
+        cross_refs={
+            "gtfobins": [f["gtfobins_url"]] if f.get("gtfobins_url") else [],
+            "cves": [],
+            "documentation": [],
+        },
+        defensive_impact={
+            "risk_to_system": "total_compromise" if primitive_type in {"root_shell_primitive", "docker_host_takeover"} else "high",
+            "visibility_risk": "low",
+        },
+        module_source="sudo_enum",
+        probe_source="sudo_probe",
+    )
+
+    return primitive
+
+
+# ========================= Module Entry =========================
+
+@register_module(
+    key="sudo_enum",
+    description="Analyse sudo -l output, capabilities, and potential attack chains",
+    required_triggers=["sudo_privesc_surface"],
+)
+def run(state: dict, report: Report):
+    """
+    In depth sudo analysis module.
+
+    - Uses existing sudo probe output (no extra sudo -l calls).
+    - Parses rules for NOPASSWD and escalation prone binaries.
+    - Assigns capability categories for known binaries.
+    - Quietly verifies candidate binaries exist and can execute basic probes.
+    - Computes severity and confidence scores.
+    - Builds high level attack chains with guidance from the shared framework.
+    - Emits offensive primitives for the global chaining engine.
+    - Writes human readable sections into the report.
+    """
+    sudo = state.get("sudo", {}) or {}
+    raw_stdout = sudo.get("raw_stdout") or ""
+
+    if not raw_stdout:
+        report.add_section(
+            "Sudo Analysis",
+            [
+                "No sudo output available in state. Either sudo is missing, denied, or the sudo probe did not run.",
+            ],
+        )
+        return
+
+    rules = _parse_sudo_rules(raw_stdout)
+
+    if not rules:
+        report.add_section(
+            "Sudo Analysis",
+            [
+                "sudo -l output was available but no rules could be parsed.",
+                "This may indicate a denial only response or an unusual sudo configuration.",
+            ],
+        )
+        return
+
+    findings: List[Dict[str, Any]] = []
+
+    for r in rules:
+        cmd = r.get("command", "") or ""
+        raw_rule = r["raw"]
+        nopasswd = r.get("nopasswd", False)
+        is_all_rule = r.get("is_all_rule", False)
+
+        base = _command_basename(cmd) if not is_all_rule else ""
+        gtfobins_hint = GTF0BINS_SUDO_HINTS.get(base)
+        capabilities = GTF0BINS_CAPABILITIES.get(base, set()) if base else set()
+        risk_categories = _risk_categories_for_rule(nopasswd, base, i
