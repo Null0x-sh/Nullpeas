@@ -285,6 +285,7 @@ def _risk_categories_for_rule(
 def _analyze_arguments(command: str, base: str) -> Set[str]:
     """
     Argument-level static risk tags.
+
     We don't know user-controllable inputs here, but we can still identify
     high-value offensive patterns:
       - wildcards
@@ -381,7 +382,7 @@ def _severity_for_rule(
     # Risk categories can boost slightly.
     cat_boost = 0.0
     if "sudo_editor_nopasswd" in risk_categories or "sudo_interpreter_nopasswd" in risk_categories:
-        cat_boost = 0.2
+        cat_boost += 0.2
     if "sudo_platform_control" in risk_categories:
         cat_boost += 0.1
 
@@ -511,7 +512,6 @@ def _offensive_classification_from_band(severity_band: str) -> str:
 def _primitive_type_for_finding(f: Dict[str, Any]) -> Optional[str]:
     """
     Decide which offensive primitive type this sudo rule should emit.
-    This is intentionally more inclusive than the earlier conservative version.
     """
     binary = f["binary"]
     caps: Set[str] = f.get("capabilities", set()) or set()
@@ -521,7 +521,7 @@ def _primitive_type_for_finding(f: Dict[str, Any]) -> Optional[str]:
     run_as = "root" if ("root" in runas_spec or "all" in runas_spec or not runas_spec) else runas_spec
     arg_risks: Set[str] = f.get("arg_risks", set()) or set()
 
-    # Global passwordless ALL is as close to "press button for root" as you get.
+    # Global passwordless ALL is effectively “press button for root”.
     if is_all_rule and nopasswd:
         return "root_shell_primitive"
 
@@ -556,11 +556,13 @@ def _primitive_type_for_finding(f: Dict[str, Any]) -> Optional[str]:
     return "sudo_exec_surface"
 
 
-def _primitive_from_finding(f: Dict[str, Any]) -> Optional[Primitive]:
+def _primitive_from_finding(state: Dict[str, Any], f: Dict[str, Any]) -> Optional[Primitive]:
     """
     Convert a sudo rule finding into an offensive primitive that the
     global chaining engine can work with.
     """
+    user = state.get("user", {}) or {}
+
     severity_band = f["severity_band"]
     severity_score = f["severity_score"]
     binary = f["binary"]
@@ -569,12 +571,19 @@ def _primitive_from_finding(f: Dict[str, Any]) -> Optional[Primitive]:
     nopasswd = f["nopasswd"]
     is_all_rule = f["is_all_rule"]
     arg_risks: Set[str] = f.get("arg_risks", set()) or set()
-    runas_spec = (f.get("runas_spec") or "").lower() if f.get("runas_spec") else ""
+    runas_spec_raw = f.get("runas_spec") or ""
+    runas_spec = runas_spec_raw.lower()
     run_as = "root" if ("root" in runas_spec or "all" in runas_spec or not runas_spec) else runas_spec
+    raw_rule = f["raw_rule"]
+    confidence_score = f["confidence_score"]
+    confidence_band = f["confidence_band"]
+    gtfobins_url = f.get("gtfobins_url")
 
     primitive_type = _primitive_type_for_finding(f)
     if not primitive_type:
         return None
+
+    origin_user = user.get("name") or "current_user"
 
     # Exploitability model – more honest and granular.
     if primitive_type in {"root_shell_primitive", "docker_host_takeover"} and nopasswd:
@@ -586,7 +595,7 @@ def _primitive_from_finding(f: Dict[str, Any]) -> Optional[Primitive]:
     else:
         exploitability = "advanced" if severity_band in {"Medium", "High"} else "theoretical"
 
-    # Stability – sudo surfaces are usually safe to try, but kernel / low-level stuff wouldn't be.
+    # Stability – sudo surfaces are usually safe to try.
     if primitive_type in {"root_shell_primitive", "docker_host_takeover"}:
         stability = "safe"
     elif primitive_type in {"arbitrary_command_execution", "arbitrary_file_write_primitive"}:
@@ -594,9 +603,4 @@ def _primitive_from_finding(f: Dict[str, Any]) -> Optional[Primitive]:
     else:
         stability = "moderate"
 
-    # Noise model – sudo is logged, but not a loud scanner.
-    noise = "low"
-
-    classification = _offensive_classification_from_band(severity_band)
-
-    confidence_score = f["confi
+    # Noise model – sudo is logged, 
