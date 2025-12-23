@@ -6,7 +6,7 @@ It is built to be quieter, smarter and more educational than traditional large p
 ![Status](https://img.shields.io/badge/status-active-blue)
 ![Language](https://img.shields.io/badge/python-3.10+-yellow)
 ![Purpose](https://img.shields.io/badge/focus-education-green)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![License](https://img.shields.io/github/license/Null0x-sh/Nullpeas)
 
 ---
 
