@@ -8,20 +8,21 @@ from nullpeas.core.guidance import build_guidance, FindingContext
 def _mode_world_group_bits(mode_str: str) -> Tuple[bool, bool]:
     """
     Given a string like '0644', return:
-      (world_has_any_perm, group_has_any_perm)
+      (world_has_write_perm, group_has_write_perm)
+
+    We only care about write, not read/execute, to avoid noisy findings.
     """
     try:
         mode_int = int(mode_str, 8)
     except Exception:
         return False, False
 
-    world_bits = mode_int & 0o007
-    group_bits = mode_int & 0o070
+    # World write bit (…w)
+    world_write = bool(mode_int & 0o002)
+    # Group write bit (…w…)
+    group_write = bool(mode_int & 0o020)
 
-    world_access = bool(world_bits)
-    group_access = bool(group_bits)
-
-    return world_access, group_access
+    return world_write, group_write
 
 
 def _classify_cron_files(files_meta: List[Dict[str, Any]]) -> Dict[str, Any]:
