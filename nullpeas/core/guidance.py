@@ -61,39 +61,35 @@ def build_guidance(context: FindingContext) -> GuidanceResult:
         raw = _build_sudo_guidance(context)
     else:
         # Fallback: no guidance for unknown surfaces yet.
-        raw = GuidanceResult(
-            navigation=[],
-            operator_research=[],
-            offensive_steps=[],
-            defensive_actions=[],
-            impact=[],
-            references=[],
-        )
+        raw: GuidanceResult = {
+            "navigation": [],
+            "operator_research": [],
+            "offensive_steps": [],
+            "defensive_actions": [],
+            "impact": [],
+            "references": [],
+        }
 
     # Apply reporting policy (drop blocks we don't want for this severity).
     band: SeverityBand = context.get("severity_band", "Low")  # type: ignore[assignment]
     filtered: GuidanceResult = {}
 
-    if band in REPORT_POLICY["show_navigation_for"]:
-        if raw.get("navigation"):
-            filtered["navigation"] = raw["navigation"]
+    if band in REPORT_POLICY["show_navigation_for"] and raw.get("navigation"):
+        filtered["navigation"] = raw["navigation"]
 
-    if band in REPORT_POLICY["show_operator_research_for"]:
-        if raw.get("operator_research"):
-            filtered["operator_research"] = raw["operator_research"]
+    if band in REPORT_POLICY["show_operator_research_for"] and raw.get("operator_research"):
+        filtered["operator_research"] = raw["operator_research"]
 
-    if band in REPORT_POLICY["show_offensive_for"]:
-        if raw.get("offensive_steps"):
-            filtered["offensive_steps"] = raw["offensive_steps"]
+    if band in REPORT_POLICY["show_offensive_for"] and raw.get("offensive_steps"):
+        filtered["offensive_steps"] = raw["offensive_steps"]
 
-    if band in REPORT_POLICY["show_defensive_for"]:
-        if raw.get("defensive_actions"):
-            filtered["defensive_actions"] = raw["defensive_actions"]
+    if band in REPORT_POLICY["show_defensive_for"] and raw.get("defensive_actions"):
+        filtered["defensive_actions"] = raw["defensive_actions"]
 
-    if band in REPORT_POLICY["show_impact_for"]:
-        if raw.get("impact"):
-            filtered["impact"] = raw["impact"]
+    if band in REPORT_POLICY["show_impact_for"] and raw.get("impact"):
+        filtered["impact"] = raw["impact"]
 
+    # References are always safe to show regardless of severity band.
     if raw.get("references"):
         filtered["references"] = raw["references"]
 
@@ -122,35 +118,33 @@ def _build_sudo_guidance(context: FindingContext) -> GuidanceResult:
     gtfobins_url: Optional[str] = context.get("gtfobins_url")
     metadata: Dict[str, Any] = context.get("metadata", {}) or {}
 
-    # For global NOPASSWD: ALL we usually want custom semantics handled
-    # in the module, not here. If you pass a special risk category we
-    # just don't try to be clever.
+    # For global NOPASSWD: ALL we usually want custom semantics:
     if "sudo_global_nopasswd_all" in risk_categories:
-        return GuidanceResult(
+        return {
             # No nav: there is no single binary.
-            navigation=[],
-            operator_research=[
+            "navigation": [],
+            "operator_research": [
                 "Enumerate which existing tools on this host can edit privileged configuration, manage services, or provide interactive shells under sudo.",
                 "For each such tool, check whether it has publicly documented sudo-abuse patterns (for example via GTFOBins or vendor documentation).",
                 "Map those patterns to high value targets on this host: sensitive data locations, service definitions, scheduled tasks, and identity/access control paths.",
             ],
-            offensive_steps=[
+            "offensive_steps": [
                 "Confirm that sudo is usable from the current user and that this broad rule applies.",
                 "Use sudo to invoke a preferred shell or administrative tool with elevated privileges.",
                 "From the elevated context, perform further actions such as reading or modifying sensitive files, changing configuration, or establishing persistence, subject to engagement scope.",
             ],
-            defensive_actions=[
+            "defensive_actions": [
                 "Identify why a NOPASSWD: ALL style rule exists and whether it is still required.",
                 "Replace NOPASSWD: ALL with tightly scoped command specific rules where possible.",
                 "Where feasible, remove NOPASSWD so that privileged actions require authentication.",
                 "Introduce monitoring and alerting for broad sudo usage and regularly review sudoers configuration.",
             ],
-            impact=[
+            "impact": [
                 "Effective full root level capabilities from the affected account.",
                 "High potential for system wide compromise and stealthy persistence if left unaddressed.",
             ],
-            references=[],
-        )
+            "references": [],
+        }
 
     # Standard sudo rule (specific binary / class)
     navigation = _sudo_navigation_from_capabilities(caps)
@@ -172,14 +166,14 @@ def _build_sudo_guidance(context: FindingContext) -> GuidanceResult:
             f"GTFOBins entry for {binary}: {gtfobins_url} (documented sudo-abuse patterns)."
         )
 
-    return GuidanceResult(
-        navigation=navigation,
-        operator_research=operator_research,
-        offensive_steps=offensive_steps,
-        defensive_actions=defensive_actions,
-        impact=impact,
-        references=references,
-    )
+    return {
+        "navigation": navigation,
+        "operator_research": operator_research,
+        "offensive_steps": offensive_steps,
+        "defensive_actions": defensive_actions,
+        "impact": impact,
+        "references": references,
+    }
 
 
 def _sudo_navigation_from_capabilities(caps: Set[str]) -> List[str]:
