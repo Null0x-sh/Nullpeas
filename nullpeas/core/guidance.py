@@ -16,7 +16,7 @@ class FindingContext(TypedDict, total=False):
     rule: str                         # raw rule or main descriptor
     binary: Optional[str]
     capabilities: Set[str]            # "shell_spawn", "file_write", ...
-    risk_categories: Set[str]         # "sudo_editor_nopasswd", ...
+    risk_categories: Set[str]         # "sudo_editor_nopasswd", "docker_user_daemon_access", ...
     severity_band: SeverityBand
     severity_score: float
     nopasswd: bool
@@ -59,6 +59,8 @@ def build_guidance(context: FindingContext) -> GuidanceResult:
 
     if surface == "sudo":
         raw = _build_sudo_guidance(context)
+    elif surface == "docker":
+        raw = _build_docker_guidance(context)
     else:
         # Fallback: no guidance for unknown surfaces yet.
         raw: GuidanceResult = {
@@ -74,22 +76,26 @@ def build_guidance(context: FindingContext) -> GuidanceResult:
     band: SeverityBand = context.get("severity_band", "Low")  # type: ignore[assignment]
     filtered: GuidanceResult = {}
 
-    if band in REPORT_POLICY["show_navigation_for"] and raw.get("navigation"):
-        filtered["navigation"] = raw["navigation"]
+    if band in REPORT_POLICY["show_navigation_for"]:
+        if raw.get("navigation"):
+            filtered["navigation"] = raw["navigation"]
 
-    if band in REPORT_POLICY["show_operator_research_for"] and raw.get("operator_research"):
-        filtered["operator_research"] = raw["operator_research"]
+    if band in REPORT_POLICY["show_operator_research_for"]:
+        if raw.get("operator_research"):
+            filtered["operator_research"] = raw["operator_research"]
 
-    if band in REPORT_POLICY["show_offensive_for"] and raw.get("offensive_steps"):
-        filtered["offensive_steps"] = raw["offensive_steps"]
+    if band in REPORT_POLICY["show_offensive_for"]:
+        if raw.get("offensive_steps"):
+            filtered["offensive_steps"] = raw["offensive_steps"]
 
-    if band in REPORT_POLICY["show_defensive_for"] and raw.get("defensive_actions"):
-        filtered["defensive_actions"] = raw["defensive_actions"]
+    if band in REPORT_POLICY["show_defensive_for"]:
+        if raw.get("defensive_actions"):
+            filtered["defensive_actions"] = raw["defensive_actions"]
 
-    if band in REPORT_POLICY["show_impact_for"] and raw.get("impact"):
-        filtered["impact"] = raw["impact"]
+    if band in REPORT_POLICY["show_impact_for"]:
+        if raw.get("impact"):
+            filtered["impact"] = raw["impact"]
 
-    # References are always safe to show regardless of severity band.
     if raw.get("references"):
         filtered["references"] = raw["references"]
 
@@ -118,7 +124,9 @@ def _build_sudo_guidance(context: FindingContext) -> GuidanceResult:
     gtfobins_url: Optional[str] = context.get("gtfobins_url")
     metadata: Dict[str, Any] = context.get("metadata", {}) or {}
 
-    # For global NOPASSWD: ALL we usually want custom semantics:
+    # For global NOPASSWD: ALL we usually want custom semantics handled
+    # in the module, not here. If you pass a special risk category we
+    # just don't try to be clever.
     if "sudo_global_nopasswd_all" in risk_categories:
         return {
             # No nav: there is no single binary.
@@ -406,8 +414,8 @@ def _sudo_operator_research(
 
     return items
 
-    
-    # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # DOCKER-SPECIFIC GUIDANCE
 # ---------------------------------------------------------------------------
 
