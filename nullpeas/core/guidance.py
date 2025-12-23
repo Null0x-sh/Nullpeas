@@ -15,8 +15,8 @@ class FindingContext(TypedDict, total=False):
     surface: str                      # e.g. "sudo", "cron", "docker"
     rule: str                         # raw rule or main descriptor
     binary: Optional[str]
-    capabilities: Set[str]            # "shell_spawn", "file_write", ...
-    risk_categories: Set[str]         # "sudo_editor_nopasswd", "docker_user_daemon_access", ...
+    capabilities: Set[str]            # "shell_spawn", "file_write", "scheduled_execution", ...
+    risk_categories: Set[str]         # "sudo_editor_nopasswd", "cron_root_system_files", ...
     severity_band: SeverityBand
     severity_score: float
     nopasswd: bool
@@ -61,6 +61,8 @@ def build_guidance(context: FindingContext) -> GuidanceResult:
         raw = _build_sudo_guidance(context)
     elif surface == "docker":
         raw = _build_docker_guidance(context)
+    elif surface == "cron":
+        raw = _build_cron_guidance(context)
     else:
         # Fallback: no guidance for unknown surfaces yet.
         raw: GuidanceResult = {
@@ -76,26 +78,22 @@ def build_guidance(context: FindingContext) -> GuidanceResult:
     band: SeverityBand = context.get("severity_band", "Low")  # type: ignore[assignment]
     filtered: GuidanceResult = {}
 
-    if band in REPORT_POLICY["show_navigation_for"]:
-        if raw.get("navigation"):
-            filtered["navigation"] = raw["navigation"]
+    if band in REPORT_POLICY["show_navigation_for"] and raw.get("navigation"):
+        filtered["navigation"] = raw["navigation"]
 
-    if band in REPORT_POLICY["show_operator_research_for"]:
-        if raw.get("operator_research"):
-            filtered["operator_research"] = raw["operator_research"]
+    if band in REPORT_POLICY["show_operator_research_for"] and raw.get("operator_research"):
+        filtered["operator_research"] = raw["operator_research"]
 
-    if band in REPORT_POLICY["show_offensive_for"]:
-        if raw.get("offensive_steps"):
-            filtered["offensive_steps"] = raw["offensive_steps"]
+    if band in REPORT_POLICY["show_offensive_for"] and raw.get("offensive_steps"):
+        filtered["offensive_steps"] = raw["offensive_steps"]
 
-    if band in REPORT_POLICY["show_defensive_for"]:
-        if raw.get("defensive_actions"):
-            filtered["defensive_actions"] = raw["defensive_actions"]
+    if band in REPORT_POLICY["show_defensive_for"] and raw.get("defensive_actions"):
+        filtered["defensive_actions"] = raw["defensive_actions"]
 
-    if band in REPORT_POLICY["show_impact_for"]:
-        if raw.get("impact"):
-            filtered["impact"] = raw["impact"]
+    if band in REPORT_POLICY["show_impact_for"] and raw.get("impact"):
+        filtered["impact"] = raw["impact"]
 
+    # References are always safe to show regardless of severity band.
     if raw.get("references"):
         filtered["references"] = raw["references"]
 
@@ -124,9 +122,7 @@ def _build_sudo_guidance(context: FindingContext) -> GuidanceResult:
     gtfobins_url: Optional[str] = context.get("gtfobins_url")
     metadata: Dict[str, Any] = context.get("metadata", {}) or {}
 
-    # For global NOPASSWD: ALL we usually want custom semantics handled
-    # in the module, not here. If you pass a special risk category we
-    # just don't try to be clever.
+    # For global NOPASSWD: ALL we usually want custom semantics:
     if "sudo_global_nopasswd_all" in risk_categories:
         return {
             # No nav: there is no single binary.
@@ -647,3 +643,236 @@ def _docker_operator_research(
         )
 
     return items
+
+
+# ---------------------------------------------------------------------------
+# CRON-SPECIFIC GUIDANCE
+# ---------------------------------------------------------------------------
+
+def _build_cron_guidance(context: FindingContext) -> GuidanceResult:
+    """
+    Cron-specific guidance builder.
+
+    Uses:
+      - risk_categories (cron_root_system_files, cron_user_crontab_present, ...)
+      - capabilities (scheduled_execution, file_write)
+      - metadata (lists of cron files, ownership, etc.)
+    and turns them into human-readable guidance.
+    """
+    caps: Set[str] = context.get("capabilities", set()) or set()
+    risk_categories: Set[str] = context.get("risk_categories", set()) or set()
+    metadata: Dict[str, Any] = context.get("metadata", {}) or {}
+
+    navigation = _cron_navigation_from_risk(caps, risk_categories, metadata)
+    operator_research = _cron_operator_research(risk_categories, metadata)
+    offensive_steps = _cron_offensive_from_risk(risk_categories, metadata)
+    defensive_actions = _cron_defensive_from_risk(risk_categories, metadata)
+    impact = _cron_impact_from_risk(caps, risk_categories, metadata)
+
+    references: List[str] = [
+        "General cron and scheduled task hardening: review distro hardening guides and CIS benchmarks for your platform.",
+    ]
+
+    return {
+        "navigation": navigation,
+        "operator_research": operator_research,
+        "offensive_steps": offensive_steps,
+        "defensive_actions": defensive_actions,
+        "impact": impact,
+        "references": references,
+    }
+
+
+def _cron_navigation_from_risk(
+    caps: Set[str],
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    lines: List[str] = []
+
+    if "cron_root_system_files" in risk_categories:
+        lines.extend(
+            [
+                "Review root-owned cron configuration under /etc/cron.* and /etc/crontab.",
+                "Identify which entries run as root or other privileged accounts and what commands or scripts they call.",
+                "Trace from the cron line to the actual script or binary on disk and note its location and ownership.",
+            ]
+        )
+
+    if "cron_nonroot_system_files" in risk_categories:
+        lines.extend(
+            [
+                "Pay close attention to any cron configuration files under /etc that are not owned by root.",
+                "Determine which user owns those files and whether that user is expected to control system-wide schedules.",
+            ]
+        )
+
+    if "cron_system_file_world_writable" in risk_categories or "cron_system_file_group_writable" in risk_categories:
+        lines.extend(
+            [
+                "Locate cron configuration files that are writable by non-root users.",
+                "For each writable file, identify which user(s) can modify it and what commands will then be executed on their behalf.",
+            ]
+        )
+
+    if "cron_user_crontab_present" in risk_categories:
+        lines.extend(
+            [
+                "Inspect the per-user crontab for this account for jobs that write to or execute out of shared or world-writable locations.",
+            ]
+        )
+
+    # De-duplicate, preserve order.
+    seen = set()
+    deduped: List[str] = []
+    for line in lines:
+        if line not in seen:
+            seen.add(line)
+            deduped.append(line)
+
+    return deduped
+
+
+def _cron_offensive_from_risk(
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    steps: List[str] = []
+
+    steps.append(
+        "Enumerate cron configuration from /etc/cron.*, /etc/crontab, and any per-user crontabs available to your account."
+    )
+
+    if "cron_root_system_files" in risk_categories:
+        steps.append(
+            "From a low-privileged perspective, treat root-owned cron jobs as potential scheduled execution points that may be influenced indirectly through the files or paths they use."
+        )
+
+    if "cron_system_file_world_writable" in risk_categories or "cron_system_file_group_writable" in risk_categories:
+        steps.append(
+            "Identify which users can modify writable cron configuration files and reason about how changes there would affect scheduled execution."
+        )
+
+    if "cron_nonroot_system_files" in risk_categories:
+        steps.append(
+            "Assess whether non-root ownership of system cron files allows lower-privileged users to schedule actions that run with more powerful identities."
+        )
+
+    if "cron_user_crontab_present" in risk_categories:
+        steps.append(
+            "For user crontabs, map which commands are run and what data or configuration they regularly touch; consider whether any of those paths are writable by other users."
+        )
+
+    steps.append(
+        "Within the engagement scope, focus on relationships where a less-privileged user can influence a script or path that later runs via cron under a more privileged identity."
+    )
+
+    return steps
+
+
+def _cron_defensive_from_risk(
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    actions: List[str] = []
+
+    if "cron_root_system_files" in risk_categories:
+        actions.append(
+            "Maintain all system-level cron configuration files under root ownership and ensure they are only edited through controlled change processes."
+        )
+
+    if "cron_nonroot_system_files" in risk_categories:
+        actions.append(
+            "Investigate any cron files under /etc that are not owned by root and align their ownership with least privilege expectations."
+        )
+
+    if "cron_system_file_world_writable" in risk_categories:
+        actions.append(
+            "Remove world-writable permissions from any cron configuration files or associated scripts; they should not be modifiable by arbitrary users."
+        )
+
+    if "cron_system_file_group_writable" in risk_categories:
+        actions.append(
+            "Review group-writable cron files and ensure the owning group does not contain untrusted or general-purpose accounts."
+        )
+
+    if "cron_user_crontab_present" in risk_categories:
+        actions.append(
+            "Periodically review per-user crontabs for security-sensitive accounts and remove obsolete or unnecessary jobs."
+        )
+
+    actions.append(
+        "Ensure that scripts invoked by cron jobs reside in directories with appropriate ownership and permissions, and avoid executing from world-writable locations."
+    )
+    actions.append(
+        "Log and monitor failures or anomalies in scheduled jobs, as they can indicate tampering or unexpected changes."
+    )
+
+    return actions
+
+
+def _cron_impact_from_risk(
+    caps: Set[str],
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    impact: List[str] = []
+
+    if "cron_root_system_files" in risk_categories:
+        impact.append(
+            "If an attacker can influence scripts or configuration used by root-owned cron jobs, they may gain periodic code execution with elevated privileges."
+        )
+
+    if "cron_nonroot_system_files" in risk_categories:
+        impact.append(
+            "Non-root ownership of system cron files can blur privilege boundaries and allow lower-privileged identities to define system-wide behaviour."
+        )
+
+    if "cron_system_file_world_writable" in risk_categories or "cron_system_file_group_writable" in risk_categories:
+        impact.append(
+            "Writable cron configuration increases the risk of stealthy persistence and recurring execution of attacker-controlled commands."
+        )
+
+    if "cron_user_crontab_present" in risk_categories:
+        impact.append(
+            "Per-user crontabs can be used as a persistence mechanism or as a way to regularly touch sensitive data or configuration under that user's identity."
+        )
+
+    if not impact:
+        impact.append(
+            "Scheduled execution surfaces may provide meaningful attack or persistence options depending on which identities own the jobs and which scripts they run."
+        )
+
+    return impact
+
+
+def _cron_operator_research(
+    risk_categories: Set[str],
+    metadata: Dict[str, Any],
+) -> List[str]:
+    items: List[str] = []
+
+    if "cron_root_system_files" in risk_categories or "cron_nonroot_system_files" in risk_categories:
+        items.extend(
+            [
+                "Compile a list of all cron-controlled commands and scripts, grouped by the identity they run as (root, service accounts, regular users).",
+                "For each script or binary, check its location, owner, and directory permissions to identify where lower-privileged users might influence behaviour.",
+            ]
+        )
+
+    if "cron_system_file_world_writable" in risk_categories or "cron_system_file_group_writable" in risk_categories:
+        items.extend(
+            [
+                "Determine which identities can modify writable cron configuration or associated scripts and whether they should have that level of control.",
+            ]
+        )
+
+    if "cron_user_crontab_present" in risk_categories:
+        items.extend(
+            [
+                "Review user crontabs for jobs that interact with shared resources, temp directories, or other paths that could become an indirect control point.",
+            ]
+        )
+
+    return items
+
