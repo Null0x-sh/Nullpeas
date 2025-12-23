@@ -2,7 +2,7 @@
 
 **Disclaimer**  
 > I am currently transitioning into a cybersecurity career and actively learning offensive security, tooling development and software engineering.  
-> Nullpeas is both a passion project **and** a learning project – expect evolution, iteration, breaking changes and constant refinement as I grow.  
+> Nullpeas is both a passion project **and** a learning project - expect evolution, iteration, breaking changes and constant refinement as I grow.  
 > This tool is not being presented as a finished “professional grade” product **yet**.  
 > It exists to help me learn deeply and hopefully help others learn alongside me.  
 
