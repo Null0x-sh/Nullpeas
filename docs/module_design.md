@@ -1,429 +1,340 @@
-## Nullpeas Sudo Advanced Module Design
+# Nullpeas Module Architecture & Design Standard
 
-### Goal
+This document defines how every Nullpeas module must be designed, behave, reason, and report, now and in the future.
 
-This module is meant to do more than dump `sudo` information.
+It exists so Nullpeas remains:
+- quiet
+- intelligent
+- chain-capable
+- brutally honest
+- professional and credible
 
-It should:
-
-- think like an operator,
-- reason about escalation chains,
-- help juniors understand what is happening,
-- still be useful for senior operators and blue teams,
-- and always remain ethical and auditable.
-
-The idea is to build **attack chain awareness**, provide **navigation-style guidance**, and clearly explain **remediation**. The module must never automatically exploit or run dangerous actions.
+Nullpeas modules are not scanners.
+They are thinking offensive intelligence components.
 
 ---
 
-### Scope & Safety Philosophy
+## Core Philosophy
 
-The `sudo_enum` module:
+Every module must:
 
-- **Does**
-  - Parse and analyse `sudo -l` output.
-  - Identify misconfigurations and escalation *classes*.
-  - Assign a severity and a confidence per finding.
-  - Link to external references (e.g. GTFOBins) for operator research.
-  - Feed structured findings into the central reporting/attack-chain system.
+- Think like an operator, not a checklist
+- Provide actionable intelligence, not noisy dumps
+- Convert findings into offensive primitives
+- Fuel the chaining engine
+- Speak truthfully about risk
+- Maintain ethical and auditable behaviour
+- Enable defenders to remediate confidently
 
-- **Does NOT**
-  - Generate exploit one-liners or PoCs.
-  - Show shell escapes, LD_PRELOAD tricks, or copy GTFOBins payloads.
-  - Run privileged commands on the target.
-  - Alter `/etc/sudoers` or any system file.
-
-Nullpeas is a **reasoning and reporting tool**. It educates, guides, and informs – it does not act like malware.
-
----
-
-### Core Responsibilities
-
-The Sudo Advanced Module is responsible for:
-
-1. **Parsing sudo rules properly**
-2. **Resolving binaries cleanly**
-3. **Assigning capability categories & risk classes**
-4. **Building structured findings**
-5. **Scoring severity and confidence**
-6. **Building attack chains**
-7. **Providing red-team navigation guidance**
-8. **Providing blue-team remediation guidance**
-9. **Linking to external references (e.g. GTFOBins) safely**
-10. **Staying ethical and safe**
-
-All outputs ultimately flow into the central reporting module, which presents:
-
-- offensive actionable context (without PoCs), and  
-- defensive remediation paths.
+If linPEAS lists it, Nullpeas must:
+- know it
+- interpret it better
+- place it in an attack chain
+- explain it like a real operator
 
 ---
 
-### Inputs & Parsing Requirements
+## Scope and Safety Boundaries
 
-**Primary input:**
+Modules DO:
+- enumerate carefully and safely
+- analyse deeply
+- reason like an attacker
+- classify capability and exploitation realism
+- produce structured offensive primitives
+- provide navigation guidance
+- provide defensive remediation guidance
+- support professional reporting
 
-- `state["sudo"]["raw_stdout"]` – raw output from `sudo -l`.
+Modules DO NOT:
+- exploit
+- modify system state
+- spawn shells
+- brute force
+- inject payloads
+- behave like malware
+- provide ready exploit commands
 
-**Trigger:**
-
-- `sudo_privesc_surface` – set when `sudo -l` data is available.
-
-The parser must handle:
-
-- Single sudo rules
-- Multiple commands in one rule
-- Wildcards and directory-wide rules (e.g. `/bin/*`, `/home/*/bin/*`)
-- Different runas targets (`(root)`, `(ALL)`, specific users)
-- `NOPASSWD` vs `PASSWD`
-- `Defaults` and `env_keep` lines
-- The special case: `(root) NOPASSWD: ALL` and equivalent “ALL” rules
-
-Output of parsing is a list of structured `SudoRule` objects containing:
-
-- raw rule line
-- identity (user or `%group`)
-- runas target
-- whether NOPASSWD applies
-- list of command specifications (paths, patterns, arguments)
-- any associated options (`Defaults`, `env_keep`, etc.)
-
-If no `sudo -l` output is available, the module should emit a short “No sudo data available” section and exit gracefully.
+Nullpeas is a pre-exploit offensive brain, not a weapon.
 
 ---
 
-### Binary Resolution
+## Module Responsibilities
 
-The module can safely:
+Every module must:
 
-- Check if a binary exists.
-- Resolve its real path (respecting symlinks).
-- Optionally run **non-privileged** checks like `binary --version` if useful and safe.
+1. Safely enumerate its surface
+2. Extract structured intelligence
+3. Classify capabilities
+4. Assign risk categories
+5. Score severity and confidence
+6. Generate offensive primitives
+7. Feed the chaining engine
+8. Produce human-readable intelligence
+9. Provide remediation guidance
+10. Maintain a serious and professional tone
 
-The module must **never**:
-
-- Run binaries via `sudo`.
-- Run binaries in ways that could alter system state.
-- Run commands that are inherently risky (network changes, service management, etc.).
-
-Binary resolution exists to:
-
-- validate presence (for confidence),
-- disambiguate names (e.g. `vim` → `/usr/bin/vim`),
-- support environment-aware reasoning.
+If a module does not do all ten, it is not finished.
 
 ---
 
-### Capability Categories
+## Inputs and Integration
 
-Each binary is classified into capability sets that describe what it can realistically do in privilege escalation situations.
+Modules consume structured probe data from state.
 
-Example capability tags:
+Examples:
+- state["sudo"]
+- state["cron"]
+- state["runtime"]
+- state["filesystem"]
+- state["services"]
 
-- `shell_spawn`
-- `file_write`
-- `file_read`
-- `editor_escape`
-- `pager_escape`
-- `interpreter`
-- `service_control`
-- `platform_control`
-- `backup_tool`
-- `devops_tool`
-- `monitoring_tool`
-- `env_loader_sensitive`
+Modules declare required triggers:
 
-A single binary may have multiple capabilities (e.g. `python` → `interpreter`, `shell_spawn`, `file_read`, `file_write`).
+@register_module(
+  key="sudo_enum",
+  required_triggers=["sudo_privesc_surface"]
+)
 
-These capabilities feed into:
-
-- risk category assignments,
-- severity scoring,
-- navigation guidance content.
+If a surface is unavailable the module must:
+- exit cleanly
+- explain why
+- avoid noisy reporting
 
 ---
 
-### Risk Categories
+## Capability Classification
 
-Rules are also mapped into higher-level **risk categories**. A single rule may belong to several categories.
+Capabilities define what a finding can realistically do.
 
-Core categories include:
+Examples:
 
-1. **Global NOPASSWD ALL**
-   - `(ALL) NOPASSWD: ALL` (user or group)
-   - Operationally equivalent to full root.
+- shell_spawn
+- file_write
+- file_read
+- platform_control
+- scheduled_execution
+- service_control
+- container_escape
+- credential_access
+- persistence
+- environment_abuse
 
-2. **Dangerous Single Binary**
-   - `sudo_editor_nopasswd` (vim, vi, nano, less…)
-   - `sudo_interpreter_nopasswd` (python, perl, ruby, node, bash…)
-   - `sudo_service_control` (systemctl, service…)
-   - `sudo_platform_control` (docker, kubectl, helm, podman…)
-   - These are classic escalation instruments when misconfigured.
-
-3. **Wildcards & Directory-Wide Rules**
-   - `sudo_wildcard_bin_dir` → `/bin/*`, `/usr/bin/*`, `/usr/sbin/*`
-   - `sudo_user_home_bin_dir` → `/home/*/bin/*`
-   - `sudo_path_like` → rules that grant sudo to entire directories.
-
-4. **Custom Script / Wrapper**
-   - `sudo_custom_script` → scripts under `/usr/local/bin`, `/opt`, etc.
-
-5. **Writable Target / Parent**
-   - `sudo_writable_target` → target or parent directory writable by invoking user.
-
-6. **Environment / Loader Abuse**
-   - `sudo_env_loader_risk` → `env_keep` on `LD_*`, `PYTHONPATH`, `PERL5LIB`, etc.
-
-7. **Over-Broad Group Rules**
-   - `sudo_group_overbroad` → `%sudo` / `%wheel` with `NOPASSWD: ALL` or very broad patterns.
-
-8. **Environment-Specific High-Impact Tools**
-   - `sudo_docker_host_control`
-   - `sudo_k8s_control`
-   - `sudo_devops_control` (ansible/salt/CI agents)
-   - `sudo_backup_control`
-   - `sudo_monitoring_control`
-
-Risk categories drive:
-
-- how the module describes the issue,
-- which navigation guidance is included,
-- and how it appears in attack chains.
+Capabilities directly influence:
+- tone
+- severity
+- chain logic
+- remediation language
 
 ---
 
-### Findings Structure
+## Risk Categories
 
-Each parsed rule is turned into **one or more structured findings** (per binary / command spec).
+Capabilities describe what something can do.
+Risk categories describe why it matters.
 
-A finding should contain at minimum:
+Examples:
 
-- raw sudo rule
-- identity (user or group)
-- runas target
-- binary path and binary name
-- whether NOPASSWD applies
-- capability tags (from the capability map)
-- risk categories (from the risk classifier)
-- severity score (0.0–10.0) and band (Low / Medium / High / Critical)
-- confidence score (0.0–10.0) and band (Low / Medium / High)
-- whether the binary exists & is executable
-- any environment notes that affect confidence (e.g. docker.sock present)
-- external reference URL(s) (e.g. GTFOBins entry), if applicable
+Sudo
+- global_nopasswd_all
+- interpreter_nopasswd
+- wildcard_path_rule
+- env_abuse_risk
 
-These findings are **data**, not presentation. The reporting layer uses them to build tables and narrative sections.
+Cron
+- root_cron_execution
+- writable_cron_script
+- timed_execution_surface
 
----
+Docker
+- daemon_access
+- socket_world_writable
+- docker_escape_feasible
 
-### Severity & Confidence Scoring
+Systemd
+- writable_unit
+- privilege_boundary_break
+- persistence_surface
 
-Sudo findings are scored along two dimensions:
+PATH
+- writable_path_directory
+- execution_hijack_surface
 
-- **Severity** – potential impact if abused.
-- **Confidence** – likelihood this is actually usable on this host.
+Filesystem
+- sensitive_file_write
+- shadow_adjacent_surface
 
-**Severity inputs (normalised 0.0–1.0 internally):**
+Capabilities
+- cap_sys_admin_boundary_break
+- execution_capability
 
-- Authentication model (`NOPASSWD` vs `PASSWD`)
-- Scope (ALL vs wildcard vs single binary)
-- Risk class (editor, interpreter, service/platform control, etc.)
-- Privileged file write/replace potential
-- Environment/loader risk (`env_keep`, `LD_*` etc.)
-- Writability of target / parent directory
-- Group-wide impact (e.g. `%wheel`, `%sudo`)
+Kernel
+- kernel_exploit_surface
 
-**Confidence inputs:**
+Credentials
+- credential_loot_surface
 
-- Does the binary actually exist and run?
-- Are environment prerequisites present?
-  - e.g. `docker` + `docker.sock`
-  - `systemctl` + systemd units
-  - `kubectl` + kubeconfig
-- Any obvious constraints detectable (read-only FS, very locked down layout, etc.)?
-
-The module computes numeric scores (0.0–10.0) and also assigns bands:
-
-- Severity band: `Low`, `Medium`, `High`, `Critical`
-- Confidence band: `Low`, `Medium`, `High`
-
-These scores are explained briefly in the report so they are auditable.
+A finding may have multiple risk categories. That is expected.
 
 ---
 
-### GTFOBins External Reference Policy
+## Severity and Confidence Model
 
-The module may link directly to **specific GTFOBins entries** for binaries it recognises.
+Every finding must contain severity and confidence.
 
-- It maintains a static map: `binary_name -> GTFOBins URL`.
-- If `binary_name` is present in this map, the finding gets a `gtfobins_url` field.
+Severity:
+- numeric score 0.0–10.0
+- band: Low, Medium, High, Critical
+- how much power the finding realistically grants
 
-**Important constraints:**
+Confidence:
+- numeric score 0.0–10.0
+- band
+- how likely it is actually exploitable
 
-- The module does **not** copy, paraphrase, or reconstruct PoCs from GTFOBins.
-- It does **not** suggest specific command lines or payloads.
-- It only provides a reference link so the operator can research further.
+Severity considers:
+- privilege level gained
+- breadth of control
+- stability risk
+- exploit realism
 
-Example report text:
+Confidence considers:
+- binary existence
+- environmental dependencies
+- whether prerequisites are present
+- ambiguity
 
-> External reference:  
-> GTFOBins entry for `vim`: https://gtfobins.github.io/gtfobins/vim/
-
-This keeps Nullpeas on the ethical edge without crossing into exploit generation.
-
----
-
-### Attack Chain System
-
-The module builds **logical attack-chain fragments**, not exploit scripts.
-
-Each finding can be expressed as a small chain, for example:
-
-- `current user → sudo (vim NOPASSWD) → privileged file modification`
-- `current user → sudo (docker NOPASSWD) → privileged container → host filesystem access`
-- `current user → sudo (systemctl NOPASSWD) → service manipulation`
-
-Attack chains are:
-
-- high-level,
-- descriptive,
-- suitable for reporting.
-
-They are consumed by the central attack-chain/reporting system, which can assemble larger narratives from multiple modules.
+Nullpeas must confidently and honestly state risk level. No needless fear and no understatements.
 
 ---
 
-### Navigation Guidance Packs
+## Offensive Primitive Output
 
-Navigation guidance explains **what to explore conceptually inside a tool** – useful for juniors and still helpful for seniors.
+Modules must output structured offensive primitives for the chaining engine.
 
-The sudo module attaches guidance based on capability classes and risk categories, for example:
+Examples:
 
-#### Editors (vim, vi, nano, ed)
+- root_shell_primitive
+- arbitrary_command_execution
+- arbitrary_file_write
+- docker_host_takeover
+- platform_control_primitive
+- path_hijack_primitive
+- cron_exec_primitive
+- service_hijack_primitive
+- capability_boundary_break
+- kernel_exploit_surface
+- credential_loot
+- container_escape_surface
 
-Understand:
+Each primitive must include:
 
-- These run with elevated privileges under sudo.
-- They can often influence **what** is written and **where**.
+- primitive_id
+- primitive_type
+- severity classification
+- exploitability truth
+- stability assessment
+- OPSEC noise impact
+- dependent surfaces
+- reasoning text
 
-Look for:
+Nullpeas is honest about exploit reality:
 
-- Features that execute external commands.
-- Scripting or macro systems.
-- Subshell capabilities.
-- Helper commands that run system tools.
-
-#### Pagers (less, more, man)
-
-Look for:
-
-- Interactive features beyond basic scrolling.
-- Ways to leave the normal view into an alternate mode.
-- Helper utilities or commands that spawn other processes.
-- External integrations (e.g. viewing files, opening editors).
-
-#### Interpreters (python, perl, ruby, lua)
-
-Understand:
-
-- This is a full privileged programming environment.
-- It can often:
-  - execute system commands,
-  - read and write files,
-  - interact with the OS.
-
-Look for:
-
-- System execution APIs.
-- File read/write APIs.
-- Ways to load modules or libraries.
-
-#### Execution Hook Utilities (find, tar, awk, rsync)
-
-Understand:
-
-- These tools execute **other programs** as part of normal operations.
-- Under sudo, those hooks may run as root.
-
-Look for:
-
-- Flags that trigger execution hooks (`-exec`, scripts, hooks).
-- How those hooks behave under elevated privileges.
-
-#### Platform / Service Tools (docker, systemctl, kubectl, helm)
-
-Understand:
-
-- These control **privileged systems** (containers, services, clusters).
-- Running them under sudo often implies host/cluster-level power.
-
-Look for:
-
-- Ability to start/stop or modify services.
-- Ability to run workloads with custom configurations.
-- Ability to mount or manipulate host resources.
-
-Navigation guidance is written in neutral, explanatory language and never lists literal exploit commands.
+Example truths:
+- Exploitability: trivial
+- Exploitability: requires manipulation
+- Exploitability: advanced
+- Exploitability: theoretical
 
 ---
 
-### Report Output
+## Navigation Guidance
 
-The module’s output is always routed through the central reporting system.
+Navigation guidance describes thinking, not commands.
 
-Expected report content includes:
+It explains:
+- why the surface matters
+- what a capable operator would conceptually explore
+- what kind of control it implies
 
-#### 1. Sudo Misconfiguration Summary
+It must never:
+- list payloads
+- give commands
+- act as a how-to exploit guide
 
-A table that lists:
-
-- Sudo rule (raw)
-- Identity (user/group)
-- Binary
-- Risk categories
-- Severity band & score
-- Confidence band & score
-
-This gives a quick triage view.
-
-#### 2. Sudo Attack Chains (Detailed Findings)
-
-Each chain / finding should include:
-
-- **Title** (e.g. `NOPASSWD vim as root for user devops`)
-- **Sudo rule** (as seen in `sudo -l`)
-- **Severity** and a short rationale
-- **Capability list** and risk categories
-- **Offensive navigation guidance** (conceptual “what to explore”, no PoC)
-- **Defensive remediation guidance**
-- **Impact explanation** (how this can affect the system in real life)
-- **Helpful references** (e.g. GTFOBins URL)
-
-Example wording:
-
-> This rule allows `devops` to run `vim` as root without a password. Vim is a fully interactive editor capable of modifying privileged configuration files and, in many environments, enabling further privileged operations. Misuse of this rule commonly leads to full system compromise.
+Tone should be professional, calm, and explanatory.
 
 ---
 
-### Safety Boundaries (Explicit)
+## Defender Remediation Guidance
 
-This module must never:
+For meaningful findings, modules must:
+- explain what is wrong
+- explain why it matters in reality
+- provide realistic remediation
+- explain what “secure” looks like
 
-- run privileged commands,
-- spawn shells,
-- alter system files,
-- attempt to exploit anything,
-- integrate with exploit frameworks,
-- act like malware or a ready-to-fire exploit kit.
+Language must:
+- be professional
+- be direct
+- avoid drama
 
-It is a **reasoning and reporting module** only.
+Nullpeas must be credible for blue teams.
 
 ---
 
-### Outcome
+## Reporting Responsibilities
 
-The end result is a serious, professional-grade sudo analysis module that:
+Modules do not fully render reports. They:
+- supply structured findings
+- supply intelligence
+- supply primitives
+- supply reasoning
 
-- helps **red teams** plan and prioritise escalation avenues,
-- helps **blue teams** identify and fix misconfigurations,
-- helps **beginners** understand *why* a rule is dangerous,
-- keeps everything ethical, defensible, and enterprise-friendly.
+The reporting engine handles:
+- layout
+- formatting
+- hierarchy
+- summaries
+
+---
+
+## Ethical Boundary Policy
+
+Nullpeas modules must never:
+- exploit
+- provide exploit PoCs
+- automate hostile behaviour
+- modify systems
+
+Nullpeas exists to:
+- educate
+- support authorised red teams
+- support defenders
+- improve security maturity
+
+Nullpeas provides the brain, not the weapon.
+
+---
+
+## Outcome
+
+A correct Nullpeas module is:
+
+- intelligent
+- meaningful
+- trusted by serious operators
+- useful to defenders
+- chain-aware
+- offensively truthful
+- ethically aligned
+- quiet and precise
+
+Modules power:
+- offensive truth
+- realistic escalation understanding
+- structured chain reasoning
+- serious reporting
+- responsible use
+
+Nullpeas is evolving into a pre-exploit offensive decision engine.
