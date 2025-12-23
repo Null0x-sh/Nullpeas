@@ -7,13 +7,17 @@ Nullpeas main entrypoint.
 - Derives triggers
 - Prints summary + suggestions
 - Optionally runs medium-level analysis modules interactively
+- Builds offensive attack chains from discovered primitives
 - Writes a Markdown report to cache/
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List
 
 from nullpeas.core.cache import save_state
 from nullpeas.core.report import Report
+from nullpeas.core.chaining_engine import build_attack_chains, summarize_chains
+from nullpeas.core.offensive_schema import Primitive
 
 from nullpeas.probes.users_groups_probe import run as run_users_groups_probe
 from nullpeas.probes.env_probe import run as run_env_probe
@@ -245,6 +249,86 @@ def _print_suggestions(state: dict):
     print()
 
 
+# ========================= Offensive Chains → Report =========================
+
+def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
+    """
+    Collect offensive primitives from modules, feed them into the chaining engine,
+    and append a structured Offensive Attack Chains section to the report.
+    """
+    primitives: List[Primitive] = state.get("offensive_primitives") or []
+
+    # No primitives – nothing offensive to chain
+    if not primitives:
+        report.add_section(
+            "Offensive Attack Chains",
+            [
+                "No offensive primitives were reported by modules.",
+                "Either the host is relatively hardened, or current modules are still conservative.",
+            ],
+        )
+        return
+
+    chains = build_attack_chains(primitives)
+
+    if not chains:
+        report.add_section(
+            "Offensive Attack Chains",
+            [
+                "Offensive primitives were discovered, but no meaningful attack chains could be constructed.",
+                "This usually indicates isolated opportunities rather than complete escalation paths.",
+            ],
+        )
+        return
+
+    summary_text = summarize_chains(chains)
+
+    lines: List[str] = []
+    lines.append("Nullpeas offensive chaining engine analysed all discovered offensive primitives.")
+    lines.append("Below are the most realistic and impactful attack chains identified on this host.")
+    lines.append("")
+    lines.append("### Offensive Summary")
+    lines.append("")
+    for line in summary_text.splitlines():
+        if line.strip():
+            lines.append(line)
+    lines.append("")
+
+    lines.append("### Detailed Attack Chains")
+    lines.append("")
+
+    for idx, chain in enumerate(chains, start=1):
+        lines.append(f"#### Chain {idx}: {chain.goal}")
+        lines.append(f"- Chain ID       : `{chain.chain_id}`")
+        lines.append(f"- Goal           : `{chain.goal}`")
+        lines.append(f"- Priority       : {chain.priority}")
+        lines.append(f"- Classification : {chain.classification}")
+        lines.append(f"- Exploitability : {chain.exploitability}")
+        lines.append(f"- Stability      : {chain.stability}")
+        lines.append(f"- Noise profile  : {chain.noise}")
+        lines.append("")
+        lines.append(f"**Offensive reality:** {chain.offensive_truth}")
+        lines.append("")
+        lines.append("**Steps:**")
+        for step in chain.steps:
+            pid = step.get("primitive_id")
+            desc = step.get("description", "").strip() or "Unnamed step"
+            lines.append(f"- `{pid}` → {desc}")
+        lines.append("")
+
+        if chain.dependent_surfaces:
+            surfaces = ", ".join(sorted(chain.dependent_surfaces))
+            lines.append(f"**Surfaces involved:** {surfaces}")
+            lines.append("")
+
+        lines.append(
+            f"**Confidence:** {chain.confidence.score}/10 "
+            f"({chain.confidence.reason})"
+        )
+        lines.append("")
+
+    report.add_section("Offensive Attack Chains", lines)
+
 
 # ========================= Interactive Modules =========================
 
@@ -330,7 +414,12 @@ def main():
     _print_suggestions(state)
 
     report = Report(title="Nullpeas Privilege Escalation Analysis")
+
+    # Interactive, operator-chosen analysis modules
     _interactive_modules(state, report)
+
+    # Offensive chaining engine: build and append attack chains to the report
+    _append_offensive_chains_to_report(state, report)
 
     if report.sections:
         path = report.write()
@@ -339,7 +428,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-if __name__ == "__main__":
-    main()
-
