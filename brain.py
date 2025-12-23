@@ -216,13 +216,12 @@ def _print_suggestions(state: dict):
         )
     elif triggers.get("sudo_privesc_surface"):
         suggestions.append(
-            "[>] Sudo rules present. Recommended: sudo_enum to parse sudo -l "
-            "and highlight potential escalation vectors."
+            "[>] Sudo rules present. Recommended: sudo_enum to parse sudo -l and highlight potential escalation vectors."
         )
 
     if triggers.get("cron_privesc_surface"):
         suggestions.append(
-            "[>] Cron surfaces detected. Future module: cron_analysis_module."
+            "[>] Cron surfaces detected. Recommended: cron_enum to analyse cron configuration and scheduled execution surfaces."
         )
 
     if triggers.get("docker_escape_surface"):
@@ -244,6 +243,7 @@ def _print_suggestions(state: dict):
         print("  " + s)
 
     print()
+
 
 
 # ========================= Interactive Modules =========================
