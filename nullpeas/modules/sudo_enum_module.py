@@ -4,6 +4,12 @@ import re
 from nullpeas.core.exec import run_command
 from nullpeas.core.report import Report
 from nullpeas.core.guidance import build_guidance, FindingContext
+from nullpeas.core.offensive_schema import (
+    Primitive,
+    PrimitiveConfidence,
+    OffensiveValue,
+    new_primitive_id,
+)
 from nullpeas.modules import register_module
 
 
@@ -11,27 +17,27 @@ from nullpeas.modules import register_module
 GTF0BINS_SUDO_HINTS: Dict[str, List[str]] = {
     "vim": [
         "Interactive editor that can run external commands and open subshell like contexts.",
-        "Can read and write files with the privileges granted by sudo."
+        "Can read and write files with the privileges granted by sudo.",
     ],
     "less": [
         "Interactive pager that can integrate with helpers or external tools.",
-        "Advanced usage can lead to execution of external programs with elevated privileges."
+        "Advanced usage can lead to execution of external programs with elevated privileges.",
     ],
     "find": [
         "File finder that can execute other programs as part of its normal operation.",
-        "Execution hooks can be abused when running under sudo."
+        "Execution hooks can be abused when running under sudo.",
     ],
     "python": [
         "Full interpreter that can execute operating system commands and manipulate files.",
-        "Running the interpreter under sudo grants a powerful privileged environment."
+        "Running the interpreter under sudo grants a powerful privileged environment.",
     ],
     "python3": [
         "Full interpreter that can execute operating system commands and manipulate files.",
-        "Running the interpreter under sudo grants a powerful privileged environment."
+        "Running the interpreter under sudo grants a powerful privileged environment.",
     ],
     "tar": [
         "Archive tool that can read and write files, sometimes with execution hooks.",
-        "Can be abused to overwrite or create privileged files."
+        "Can be abused to overwrite or create privileged files.",
     ],
     "bash": [
         "Shell that provides a direct privileged execution environment when allowed under sudo.",
@@ -76,7 +82,7 @@ GTF0BINS_URLS: Dict[str, str] = {
 # Capability categories describe what a binary can realistically do in an escalation context.
 GTF0BINS_CAPABILITIES: Dict[str, Set[str]] = {
     "vim": {"editor_escape", "shell_spawn", "file_read", "file_write"},
-    "vi": {"editor_escape, shell_spawn", "file_read", "file_write"},
+    "vi": {"editor_escape", "shell_spawn", "file_read", "file_write"},
     "nano": {"editor_escape", "file_read", "file_write"},
     "ed": {"editor_escape", "file_read", "file_write"},
 
@@ -151,7 +157,7 @@ def _parse_sudo_rules(raw_stdout: str) -> List[Dict[str, Any]]:
 
         # Extract runas spec inside the first parentheses, if any.
         runas_spec: Optional[str] = None
-        m = re.match(r"^\(([^)]+)\)\s*(.*)$", stripped)
+        m = re.match(r"^([^)]+)\s*(.*)$", stripped)
         rest = stripped
         if m:
             runas_spec = m.group(1).strip()
@@ -394,338 +400,4 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             },
         }
 
-        guidance = build_guidance(ctx)
-
-        chains.append(
-            {
-                "title": _title_for_sudo_chain(binary, risk_categories),
-                "rule": rule,
-                "binary": binary,
-                "severity_band": severity_band,
-                "severity_score": f["severity_score"],
-                "capabilities": caps,
-                "guidance": guidance,
-            }
-        )
-
-    return chains
-
-
-@register_module(
-    key="sudo_enum",
-    description="Analyse sudo -l output, capabilities, and potential attack chains",
-    required_triggers=["sudo_privesc_surface"],
-)
-def run(state: dict, report: Report):
-    """
-    In depth sudo analysis module.
-
-    - Uses existing sudo probe output (no extra sudo -l calls).
-    - Parses rules for NOPASSWD and escalation prone binaries.
-    - Assigns capability categories for known binaries.
-    - Quietly verifies candidate binaries exist and can execute basic probes.
-    - Computes severity and confidence scores.
-    - Builds high level attack chains with guidance from the shared framework.
-    - Writes human readable sections into the report.
-    """
-    sudo = state.get("sudo", {}) or {}
-    raw_stdout = sudo.get("raw_stdout") or ""
-
-    if not raw_stdout:
-        report.add_section(
-            "Sudo Analysis",
-            [
-                "No sudo output available in state. Either sudo is missing, denied, or the sudo probe did not run.",
-            ],
-        )
-        return
-
-    rules = _parse_sudo_rules(raw_stdout)
-
-    if not rules:
-        report.add_section(
-            "Sudo Analysis",
-            [
-                "sudo -l output was available but no rules could be parsed.",
-                "This may indicate a denial only response or an unusual sudo configuration.",
-            ],
-        )
-        return
-
-    findings: List[Dict[str, Any]] = []
-
-    for r in rules:
-        cmd = r.get("command", "") or ""
-        raw_rule = r["raw"]
-        nopasswd = r.get("nopasswd", False)
-        is_all_rule = r.get("is_all_rule", False)
-
-        base = _command_basename(cmd) if not is_all_rule else ""
-        gtfobins_hint = GTF0BINS_SUDO_HINTS.get(base)
-        capabilities = GTF0BINS_CAPABILITIES.get(base, set()) if base else set()
-        risk_categories = _risk_categories_for_rule(nopasswd, base, is_all_rule)
-
-        if base:
-            bin_info = _verify_binary_available(base)
-        else:
-            bin_info = {
-                "name": base,
-                "exists_in_path": False,
-                "resolved_path": None,
-                "version_check_ok": False,
-            }
-
-        severity_score, severity_band = _severity_for_rule(
-            nopasswd=nopasswd,
-            binary_info=bin_info,
-            has_gtfobins_hint=(gtfobins_hint is not None),
-            capabilities=capabilities,
-            is_all_rule=is_all_rule,
-            risk_categories=risk_categories,
-        )
-        confidence_score, confidence_band = _confidence_for_rule(
-            binary_info=bin_info,
-            is_all_rule=is_all_rule,
-        )
-
-        gtfobins_url = GTF0BINS_URLS.get(base)
-
-        findings.append(
-            {
-                "raw_rule": raw_rule,
-                "nopasswd": nopasswd,
-                "binary": base or None,
-                "binary_info": bin_info,
-                "has_gtfobins_hint": gtfobins_hint is not None,
-                "gtfobins_hint_lines": gtfobins_hint or [],
-                "gtfobins_url": gtfobins_url,
-                "capabilities": capabilities,
-                "risk_categories": risk_categories,
-                "severity_score": severity_score,
-                "severity_band": severity_band,
-                "confidence_score": confidence_score,
-                "confidence_band": confidence_band,
-                "is_all_rule": is_all_rule,
-            }
-        )
-
-    # Build main analysis section.
-    lines: List[str] = []
-
-    lines.append("This section analyses the existing sudo -l output collected by Nullpeas.")
-    lines.append("No additional sudo -l invocations were made by this module.")
-    lines.append("It performed limited extra checks (command lookup and simple version/help probes) to confirm binaries exist and can run.")
-    lines.append("Severity reflects potential impact if abused, confidence reflects how likely the rule is usable on this host.")
-    lines.append("")
-
-    lines.append("### Parsed sudo rules")
-    for f in findings:
-        lines.append(f"- {f['raw_rule']}")
-    lines.append("")
-
-    def _group_by_band(band: str) -> List[Dict[str, Any]]:
-        return [f for f in findings if f["severity_band"] == band]
-
-    critical = _group_by_band("Critical")
-    high = _group_by_band("High")
-    med = _group_by_band("Medium")
-    low = _group_by_band("Low")
-
-    if critical:
-        lines.append("### Critical sudo surfaces")
-        lines.append("")
-        for f in critical:
-            bi = f["binary_info"]
-            caps = f["capabilities"]
-            lines.append(f"- `{f['raw_rule']}`")
-            lines.append(f"  - Binary            : {f['binary']}")
-            lines.append(f"  - Resolved path     : {bi.get('resolved_path')}")
-            lines.append(f"  - Binary available  : {bi.get('exists_in_path')}")
-            lines.append(f"  - Executes cleanly  : {bi.get('version_check_ok')}")
-            lines.append(f"  - NOPASSWD          : {f['nopasswd']}")
-            lines.append(f"  - Severity          : {f['severity_band']} ({f['severity_score']}/10)")
-            lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
-            if caps:
-                lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
-            cats = f["risk_categories"]
-            if cats:
-                lines.append(f"  - Risk categories   : {', '.join(sorted(cats))}")
-            if f["gtfobins_url"]:
-                lines.append(
-                    f"  - External reference: {f['gtfobins_url']} "
-                    f"(public catalogue of known sudo-abuse patterns for {f['binary']})"
-                )
-            lines.append("")
-        lines.append("")
-
-    if high:
-        lines.append("### High severity sudo surfaces")
-        lines.append("")
-        for f in high:
-            bi = f["binary_info"]
-            caps = f["capabilities"]
-            lines.append(f"- `{f['raw_rule']}`")
-            lines.append(f"  - Binary            : {f['binary']}")
-            lines.append(f"  - Resolved path     : {bi.get('resolved_path')}")
-            lines.append(f"  - Binary available  : {bi.get('exists_in_path')}")
-            lines.append(f"  - Executes cleanly  : {bi.get('version_check_ok')}")
-            lines.append(f"  - NOPASSWD          : {f['nopasswd']}")
-            lines.append(f"  - Severity          : {f['severity_band']} ({f['severity_score']}/10)")
-            lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
-            if caps:
-                lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
-            cats = f["risk_categories"]
-            if cats:
-                lines.append(f"  - Risk categories   : {', '.join(sorted(cats))}")
-            if f["gtfobins_url"]:
-                lines.append(
-                    f"  - External reference: {f['gtfobins_url']} "
-                    f"(public catalogue of known sudo-abuse patterns for {f['binary']})"
-                )
-            lines.append("")
-        lines.append("")
-
-    if med:
-        lines.append("### Medium severity sudo surfaces")
-        lines.append("")
-        for f in med:
-            bi = f["binary_info"]
-            caps = f["capabilities"]
-            lines.append(f"- `{f['raw_rule']}`")
-            lines.append(f"  - Binary            : {f['binary']}")
-            lines.append(f"  - Resolved path     : {bi.get('resolved_path')}")
-            lines.append(f"  - Binary available  : {bi.get('exists_in_path')}")
-            lines.append(f"  - Executes cleanly  : {bi.get('version_check_ok')}")
-            lines.append(f"  - NOPASSWD          : {f['nopasswd']}")
-            lines.append(f"  - Severity          : {f['severity_band']} ({f['severity_score']}/10)")
-            lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
-            if caps:
-                lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
-            cats = f["risk_categories"]
-            if cats:
-                lines.append(f"  - Risk categories   : {', '.join(sorted(cats))}")
-            if f["gtfobins_url"]:
-                lines.append(
-                    f"  - External reference: {f['gtfobins_url']} "
-                    f"(public catalogue of known sudo-abuse patterns for {f['binary']})"
-                )
-            lines.append("")
-        lines.append("")
-
-    if low:
-        lines.append("### Low severity or unverified sudo surfaces")
-        lines.append("")
-        for f in low:
-            bi = f["binary_info"]
-            caps = f["capabilities"]
-            lines.append(f"- `{f['raw_rule']}`")
-            lines.append(f"  - Binary            : {f['binary']}")
-            lines.append(f"  - Resolved path     : {bi.get('resolved_path')}")
-            lines.append(f"  - Binary available  : {bi.get('exists_in_path')}")
-            lines.append(f"  - Executes cleanly  : {bi.get('version_check_ok')}")
-            lines.append(f"  - NOPASSWD          : {f['nopasswd']}")
-            lines.append(f"  - Severity          : {f['severity_band']} ({f['severity_score']}/10)")
-            lines.append(f"  - Confidence        : {f['confidence_band']} ({f['confidence_score']}/10)")
-            if caps:
-                lines.append(f"  - Capabilities      : {', '.join(sorted(caps))}")
-            cats = f["risk_categories"]
-            if cats:
-                lines.append(f"  - Risk categories   : {', '.join(sorted(cats))}")
-            if f["gtfobins_url"]:
-                lines.append(
-                    f"  - External reference: {f['gtfobins_url']} "
-                    f"(public catalogue of known sudo-abuse patterns for {f['binary']})"
-                )
-            lines.append("")
-        lines.append("")
-
-    report.add_section("Sudo Analysis", lines)
-
-    # Build attack chains section using the shared guidance engine.
-    chains = _build_attack_chains(findings)
-    if chains:
-        chain_lines: List[str] = []
-        chain_lines.append(
-            "This section describes high level attack chains based on the sudo configuration."
-        )
-        chain_lines.append(
-            "Nullpeas does not execute these chains. They describe what could be done by an operator "
-            "or attacker, and how defenders can respond."
-        )
-        chain_lines.append("")
-
-        for c in chains:
-            caps = c.get("capabilities", set()) or set()
-            binary = c.get("binary")
-            guidance = c["guidance"]
-
-            chain_lines.append(f"### {c['title']}")
-            chain_lines.append("")
-            chain_lines.append("Rule:")
-            chain_lines.append(f"- `{c['rule']}`")
-            chain_lines.append("")
-            chain_lines.append("Severity:")
-            chain_lines.append(f"- {c['severity_band']} ({c['severity_score']}/10)")
-            chain_lines.append("")
-
-            if binary:
-                chain_lines.append("Binary:")
-                chain_lines.append(f"- {binary}")
-                chain_lines.append("")
-
-            if caps:
-                chain_lines.append("Capabilities:")
-                chain_lines.append(f"- {', '.join(sorted(caps))}")
-                chain_lines.append("")
-
-            nav = guidance.get("navigation") or []
-            if nav:
-                chain_lines.append("Navigation guidance (for operators):")
-                for line in nav:
-                    chain_lines.append(f"- {line}")
-                chain_lines.append("")
-
-            operator_research = guidance.get("operator_research") or []
-            if operator_research:
-                chain_lines.append("Operator research checklist:")
-                for item in operator_research:
-                    chain_lines.append(f"- {item}")
-                chain_lines.append("")
-
-            offensive_steps = guidance.get("offensive_steps") or []
-            if offensive_steps:
-                chain_lines.append("High level offensive path (for red teams and threat modelling):")
-                chain_lines.append("")
-                for idx, step in enumerate(offensive_steps, start=1):
-                    chain_lines.append(f"{idx}. {step}")
-                chain_lines.append("")
-                chain_lines.append(
-                    "Note: Nullpeas does not execute any of the above. These steps describe possible operator behaviour."
-                )
-                chain_lines.append("")
-
-            defensive_actions = guidance.get("defensive_actions") or []
-            if defensive_actions:
-                chain_lines.append("Defensive remediation path (for blue teams):")
-                chain_lines.append("")
-                for idx, action in enumerate(defensive_actions, start=1):
-                    chain_lines.append(f"{idx}. {action}")
-                chain_lines.append("")
-
-            impact = guidance.get("impact") or []
-            if impact:
-                chain_lines.append("Potential impact if left unresolved:")
-                for imp in impact:
-                    chain_lines.append(f"- {imp}")
-                chain_lines.append("")
-
-            refs = guidance.get("references") or []
-            if refs:
-                chain_lines.append("References:")
-                for ref in refs:
-                    chain_lines.append(f"- {ref}")
-                chain_lines.append("")
-
-            chain_lines.append("")
-
-        report.add_section("Sudo Attack Chains", chain_lines)
+        guidance = build
