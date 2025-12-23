@@ -48,8 +48,11 @@ def register_module(
 
 def _ensure_discovered():
     """
-    Auto-import all *_module.py files in this package once,
+    Auto-import all Python modules in this package once,
     so their @register_module decorators run and populate the registry.
+
+    We deliberately import *all* non-private modules (no leading underscore)
+    instead of relying on a naming convention like *_module.
     """
     global _DISCOVERED
     if _DISCOVERED:
@@ -59,10 +62,14 @@ def _ensure_discovered():
     package_path = Path(__file__).parent
 
     for module_info in pkgutil.iter_modules([str(package_path)]):
-        # Only import files that look like modules, e.g. sudo_enum_module.py
-        if not module_info.name.endswith("_module"):
+        name = module_info.name
+
+        # Skip private / dunder modules.
+        if name.startswith("_"):
             continue
-        importlib.import_module(f"{package_name}.{module_info.name}")
+
+        # We *do* want things like sudo_enum, docker_enum, cron_enum, etc.
+        importlib.import_module(f"{package_name}.{name}")
 
     _DISCOVERED = True
 
