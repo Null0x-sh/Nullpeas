@@ -3,6 +3,12 @@ from typing import Dict, Any, List, Set, Tuple
 from nullpeas.core.report import Report
 from nullpeas.modules import register_module
 from nullpeas.core.guidance import build_guidance, FindingContext, SeverityBand
+from nullpeas.core.offensive_schema import (
+    Primitive,
+    PrimitiveConfidence,
+    OffensiveValue,
+    new_primitive_id,
+)
 
 
 def _mode_to_int(mode_str: str) -> int:
@@ -37,7 +43,6 @@ def _docker_risk_categories(state: Dict[str, Any]) -> Set[str]:
     docker_socket_exists = docker.get("socket_exists", False)
     socket_mode_str = docker.get("socket_mode", "") or ""
     socket_mode = _mode_to_int(socket_mode_str)
-    socket_group = docker.get("socket_group", None)
 
     in_docker_group = user.get("in_docker_group", False) or triggers.get(
         "in_docker_group", False
@@ -73,7 +78,8 @@ def _docker_risk_categories(state: Dict[str, Any]) -> Set[str]:
 
 def _docker_capabilities_from_risk(risk_categories: Set[str]) -> Set[str]:
     """
-    Map docker-related risk categories to capability tags understood by guidance.
+    Map docker-related risk categories to capability tags understood by guidance
+    and the offensive chaining engine.
     """
     caps: Set[str] = set()
 
@@ -91,8 +97,8 @@ def _docker_capabilities_from_risk(risk_categories: Set[str]) -> Set[str]:
     ):
         caps.add("container_escape")
 
-    # If the daemon can control volumes, that can be modelled as file_read/write
-    # even though it's indirect.
+    # Daemon access implicitly implies the ability to mount host paths,
+    # start privileged containers, etc. Model as indirect file R/W.
     if "platform_control" in caps:
         caps.add("file_read")
         caps.add("file_write")
@@ -136,12 +142,12 @@ def _docker_severity_and_confidence(
 
     # Clamp base if nothing was set.
     if severity_raw == 0.0:
-        severity_raw = 0.2  # mild: docker present but no obvious high-risk feature
+        # docker present but no obvious high-risk feature.
+        severity_raw = 0.2
 
-    # Normalise (roughly) into 0–1 range.
     severity_raw = min(severity_raw, 1.0)
 
-    # Strengthen if both daemon access and container-escape-ish signals exist.
+    # Strengthen if both daemon access AND container-escape-ish signals exist.
     if "docker_user_daemon_access" in risk_categories and (
         "docker_socket_in_container" in risk_categories
         or "container_escape_surface" in risk_categories
@@ -183,6 +189,168 @@ def _docker_severity_and_confidence(
     return severity_score, severity_band, confidence_score, confidence_band
 
 
+def _offensive_classification_from_band(severity_band: str) -> str:
+    if severity_band == "Critical":
+        return "catastrophic"
+    if severity_band == "High":
+        return "severe"
+    if severity_band == "Medium":
+        return "useful"
+    return "niche"
+
+
+def _primitive_type_for_docker_surface(
+    risk_categories: Set[str],
+    capabilities: Set[str],
+    severity_band: SeverityBand,
+) -> str:
+    """
+    Map the Docker surface to an offensive primitive type.
+    """
+    has_daemon_access = "docker_user_daemon_access" in risk_categories
+    socket_world = "docker_socket_world_writable" in risk_categories
+    socket_group = "docker_socket_group_writable" in risk_categories
+    escape_hint = (
+        "docker_socket_in_container" in risk_categories
+        or "docker_escape_surface" in risk_categories
+        or "container_escape_surface" in risk_categories
+    )
+    platform_control = "platform_control" in capabilities
+
+    # World/group writable daemon socket is basically "anyone can become root via Docker".
+    if socket_world or socket_group:
+        return "docker_host_takeover"
+
+    # User in docker group with platform control.
+    if has_daemon_access and platform_control:
+        if severity_band in {"Critical", "High"}:
+            return "docker_host_takeover"
+        return "docker_platform_control_surface"
+
+    # Container escape context: socket inside a container.
+    if escape_hint and platform_control:
+        return "docker_container_escape_surface"
+
+    # Fallback: CLI + daemon present but not clearly reachable.
+    return "docker_daemon_present"
+
+
+def _primitive_for_docker_surface(
+    state: Dict[str, Any],
+    risk_categories: Set[str],
+    capabilities: Set[str],
+    severity_score: float,
+    severity_band: SeverityBand,
+    confidence_score: float,
+    confidence_band: str,
+    rule_desc: str,
+) -> Primitive:
+    """
+    Build a Docker offensive Primitive for the chaining engine.
+    """
+    user = state.get("user", {}) or {}
+    runtime = state.get("runtime", {}) or {}
+    docker = runtime.get("docker", {}) or {}
+
+    user_name = user.get("name") or "current_user"
+    in_docker_group = user.get("in_docker_group", False) or state.get("triggers", {}).get("in_docker_group", False)
+    in_container = (runtime.get("container", {}) or {}).get("in_container", False)
+
+    primitive_type = _primitive_type_for_docker_surface(
+        risk_categories=risk_categories,
+        capabilities=capabilities,
+        severity_band=severity_band,
+    )
+
+    # Effective run_as: if we can control the daemon socket, that usually implies root control.
+    if primitive_type in {"docker_host_takeover", "docker_platform_control_surface", "docker_container_escape_surface"}:
+        run_as = "root"
+    else:
+        run_as = user_name
+
+    # Exploitability model.
+    if primitive_type == "docker_host_takeover":
+        exploitability = "trivial" if in_docker_group or "docker_socket_world_writable" in risk_categories else "moderate"
+    elif primitive_type in {"docker_platform_control_surface", "docker_container_escape_surface"}:
+        exploitability = "moderate"
+    else:
+        exploitability = "advanced" if severity_band in {"Medium", "High"} else "theoretical"
+
+    # Stability: Docker-based escalations are usually stable when well understood.
+    if primitive_type in {"docker_host_takeover", "docker_platform_control_surface"}:
+        stability = "safe"
+    else:
+        stability = "moderate"
+
+    # Noise: interacting with Docker is logged but not scan-noisy.
+    noise = "low"
+
+    classification_band = _offensive_classification_from_band(severity_band)
+
+    confidence = PrimitiveConfidence(
+        score=confidence_score,
+        reason=(
+            f"Docker CLI/socket presence and metadata yield {confidence_band} confidence "
+            f"in this daemon-related surface."
+        ),
+    )
+
+    offensive_value = OffensiveValue(
+        classification=classification_band,
+        why=(
+            f"Docker configuration implies {primitive_type} for run_as={run_as} "
+            f"with severity={severity_band} (score={severity_score}/10). "
+            "Daemon access can typically be turned into container-based host control with standard techniques."
+        ),
+    )
+
+    socket_path = docker.get("socket_path") or "/var/run/docker.sock"
+
+    primitive = Primitive(
+        id=new_primitive_id("docker", primitive_type),
+        surface="docker",
+        type=primitive_type,
+        run_as=run_as,
+        origin_user=user_name,
+        exploitability=exploitability,
+        stability=stability,
+        noise=noise,
+        confidence=confidence,
+        offensive_value=offensive_value,
+        context={
+            "risk_categories": sorted(risk_categories),
+            "capabilities": sorted(capabilities),
+            "severity_band": severity_band,
+            "severity_score": severity_score,
+            "socket_path": socket_path,
+            "in_docker_group": in_docker_group,
+            "in_container": in_container,
+        },
+        conditions={
+            "requires_docker_cli": docker.get("binary_present", False),
+            "requires_socket_access": docker.get("socket_exists", False),
+        },
+        integration_flags={
+            "chaining_allowed": True,
+            "supports_persistence_extension": True,
+            "supports_lateral_chain": False,
+        },
+        cross_refs={
+            "gtfobins": [],
+            "cves": [],
+            "documentation": [],
+        },
+        defensive_impact={
+            "risk_to_system": "total_compromise" if run_as == "root" else "high",
+            "visibility_risk": "low",
+        },
+        module_source="docker_enum",
+        probe_source="runtime_probe",
+    )
+
+    return primitive
+
+
 @register_module(
     key="docker_enum",
     description="Analyse Docker daemon access, socket exposure, and potential container escape surfaces",
@@ -197,6 +365,7 @@ def run(state: dict, report: Report):
     - Assigns capability categories (platform_control, container_escape, file_read/write).
     - Scores severity and confidence.
     - Delegates narrative guidance to the shared guidance engine.
+    - Emits a Docker offensive primitive for the chaining engine.
     """
     runtime = state.get("runtime", {}) or {}
     docker = runtime.get("docker", {}) or {}
@@ -229,12 +398,13 @@ def run(state: dict, report: Report):
     ).get("in_docker_group", False)
 
     # Build a single high-level finding representing docker daemon surface.
-    rule_desc = f"Docker daemon reachable via socket {socket_path}" if docker.get(
-        "socket_exists"
-    ) else "Docker CLI present without confirmed daemon/socket access"
+    rule_desc = (
+        f"Docker daemon reachable via socket {socket_path}"
+        if docker.get("socket_exists")
+        else "Docker CLI present without confirmed daemon/socket access"
+    )
 
-    # Build guidance context (surface="docker") – this is the only place
-    # docker_enum needs to think about prose now.
+    # Build guidance context (surface="docker").
     ctx: FindingContext = {
         "surface": "docker",
         "rule": rule_desc,
@@ -262,9 +432,7 @@ def run(state: dict, report: Report):
     # ------------------------------------------------------------------
     lines: List[str] = []
 
-    lines.append(
-        "This section analyses Docker-related privilege surfaces observed by Nullpeas."
-    )
+    lines.append("This section analyses Docker-related privilege surfaces observed by Nullpeas.")
     lines.append(
         "It uses existing runtime inspection (binary presence, version checks, and socket metadata) "
         "and does not start or modify any containers."
@@ -291,13 +459,9 @@ def run(state: dict, report: Report):
     lines.append(f"- Severity                    : {severity_band} ({severity_score}/10)")
     lines.append(f"- Confidence                  : {confidence_band} ({confidence_score}/10)")
     if capabilities:
-        lines.append(
-            f"- Capability tags             : {', '.join(sorted(capabilities))}"
-        )
+        lines.append(f"- Capability tags             : {', '.join(sorted(capabilities))}")
     if risk_categories:
-        lines.append(
-            f"- Risk categories             : {', '.join(sorted(risk_categories))}"
-        )
+        lines.append(f"- Risk categories             : {', '.join(sorted(risk_categories))}")
     lines.append("")
 
     report.add_section("Docker Analysis", lines)
@@ -317,7 +481,7 @@ def run(state: dict, report: Report):
     chain_lines.append("and how defenders can respond.")
     chain_lines.append("")
 
-    chain_lines.append(f"### docker -> daemon -> workload control")
+    chain_lines.append("### docker -> daemon -> workload control")
     chain_lines.append("")
     chain_lines.append("Rule:")
     chain_lines.append(f"- {rule_desc}")
@@ -380,3 +544,19 @@ def run(state: dict, report: Report):
         chain_lines.append("")
 
     report.add_section("Docker Attack Chains", chain_lines)
+
+    # ------------------------------------------------------------------
+    # Offensive primitive for chaining engine
+    # ------------------------------------------------------------------
+    primitive = _primitive_for_docker_surface(
+        state=state,
+        risk_categories=risk_categories,
+        capabilities=capabilities,
+        severity_score=severity_score,
+        severity_band=severity_band,
+        confidence_score=confidence_score,
+        confidence_band=confidence_band,
+        rule_desc=rule_desc,
+    )
+
+    state.setdefault("offensive_primitives", []).append(primitive)
