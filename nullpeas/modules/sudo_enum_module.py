@@ -51,6 +51,12 @@ GTF0BINS_SUDO_HINTS: Dict[str, List[str]] = {
     "systemctl": [
         "Service and platform control tool that can manage systemd units and privileged services.",
     ],
+    "tee": [
+        "Can write to arbitrary files; when run as root it can overwrite sensitive files.",
+    ],
+    "cat": [
+        "Can read sensitive files; may leak credentials or secrets when run as root.",
+    ],
 }
 
 
@@ -76,6 +82,8 @@ GTF0BINS_URLS: Dict[str, str] = {
     "sh": "https://gtfobins.github.io/gtfobins/sh/",
     "docker": "https://gtfobins.github.io/gtfobins/docker/",
     "systemctl": "https://gtfobins.github.io/gtfobins/systemctl/",
+    "tee": "https://gtfobins.github.io/gtfobins/tee/",
+    "cat": "https://gtfobins.github.io/gtfobins/cat/",
 }
 
 
@@ -100,6 +108,8 @@ GTF0BINS_CAPABILITIES: Dict[str, Set[str]] = {
     "tar": {"file_read", "file_write"},
     "awk": {"exec_hook"},
     "rsync": {"exec_hook", "file_write"},
+    "tee": {"file_write"},
+    "cat": {"file_read"},
 
     "bash": {"shell_spawn"},
     "sh": {"shell_spawn"},
@@ -263,7 +273,61 @@ def _risk_categories_for_rule(
     if base in {"find", "awk", "rsync", "tar"}:
         cats.add("sudo_exec_hook_tool")
 
+    # File-oriented impact
+    if base in {"tee", "tar", "rsync"}:
+        cats.add("sudo_file_write_surface")
+    if base in {"cat"}:
+        cats.add("sudo_file_read_surface")
+
     return cats
+
+
+def _analyze_arguments(command: str, base: str) -> Set[str]:
+    """
+    Argument-level static risk tags.
+    We don't know user-controllable inputs here, but we can still identify
+    high-value offensive patterns:
+      - wildcards
+      - redirection
+      - sensitive paths
+      - dynamic tokens that often resolve to user/host-specific data
+    """
+    risks: Set[str] = set()
+    if not command:
+        return risks
+
+    # Wildcards / globs
+    if "*" in command or "?" in command:
+        risks.add("wildcard_glob")
+
+    # Redirection / overwrite operations
+    if ">>" in command or " > " in command:
+        risks.add("redirect_write")
+
+    # Sensitive target paths
+    sensitive_tokens = [
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/sudoers",
+        "/root/",
+        "/home/",
+        ".ssh/",
+        "authorized_keys",
+        "/var/log/",
+    ]
+    if any(tok in command for tok in sensitive_tokens):
+        risks.add("sensitive_target")
+
+    # Potential dynamic/user-linked tokens
+    dynamic_tokens = ["$HOME", "$USER", "%h", "%u", "~", "$("]
+    if any(tok in command for tok in dynamic_tokens):
+        risks.add("dynamic_path")
+
+    # Combined risk for editors / file tools
+    if base in {"vim", "vi", "nano", "ed", "tee", "tar", "rsync"} and "sensitive_target" in risks:
+        risks.add("sensitive_file_edit_surface")
+
+    return risks
 
 
 def _severity_for_rule(
@@ -273,12 +337,14 @@ def _severity_for_rule(
     capabilities: Set[str],
     is_all_rule: bool,
     risk_categories: Set[str],
+    arg_risks: Set[str],
 ) -> Tuple[float, str]:
     """
     Numeric severity scoring + band.
 
     - Global NOPASSWD: ALL => 10.0 (Critical)
     - NOPASSWD + dangerous capabilities (shell, interpreter, platform_control) => high
+    - Sudo file-write + sensitive targets => high
     - Presence of escalation-prone capabilities or GTFOBins hint => medium+
     - Otherwise low.
     """
@@ -300,6 +366,15 @@ def _severity_for_rule(
     elif has_gtfobins_hint:
         class_factor = 0.5
 
+    # Arg risks & file surfaces can significantly raise impact.
+    arg_factor = 0.0
+    if "sensitive_file_edit_surface" in arg_risks:
+        arg_factor = 0.3
+    elif "sensitive_target" in arg_risks:
+        arg_factor = 0.2
+    elif "wildcard_glob" in arg_risks:
+        arg_factor = 0.1
+
     # If binary does not exist, tone down slightly.
     existence_factor = 1.0 if exists else 0.6
 
@@ -307,12 +382,15 @@ def _severity_for_rule(
     cat_boost = 0.0
     if "sudo_editor_nopasswd" in risk_categories or "sudo_interpreter_nopasswd" in risk_categories:
         cat_boost = 0.2
+    if "sudo_platform_control" in risk_categories:
+        cat_boost += 0.1
 
     severity_raw = (
-        0.25 * auth_factor
-        + 0.20 * scope_factor
-        + 0.40 * class_factor
-        + 0.15 * existence_factor
+        0.22 * auth_factor
+        + 0.18 * scope_factor
+        + 0.35 * class_factor
+        + 0.10 * existence_factor
+        + 0.10 * arg_factor
         + cat_boost
     )
     # clamp 0.0–1.0
@@ -397,6 +475,7 @@ def _build_attack_chains(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "gtfobins_url": gtfobins_url,
             "metadata": {
                 "binary_info": f["binary_info"],
+                "arg_risks": sorted(f.get("arg_risks", set())),
             },
         }
 
@@ -429,177 +508,95 @@ def _offensive_classification_from_band(severity_band: str) -> str:
     return "niche"
 
 
+def _primitive_type_for_finding(f: Dict[str, Any]) -> Optional[str]:
+    """
+    Decide which offensive primitive type this sudo rule should emit.
+    This is intentionally more inclusive than the earlier conservative version.
+    """
+    binary = f["binary"]
+    caps: Set[str] = f.get("capabilities", set()) or set()
+    nopasswd = f["nopasswd"]
+    is_all_rule = f["is_all_rule"]
+    runas_spec = (f.get("runas_spec") or "").lower() if f.get("runas_spec") else ""
+    run_as = "root" if ("root" in runas_spec or "all" in runas_spec or not runas_spec) else runas_spec
+    arg_risks: Set[str] = f.get("arg_risks", set()) or set()
+
+    # Global passwordless ALL is as close to "press button for root" as you get.
+    if is_all_rule and nopasswd:
+        return "root_shell_primitive"
+
+    # Docker as root => likely host takeover.
+    if nopasswd and "platform_control" in caps and run_as == "root" and binary == "docker":
+        return "docker_host_takeover"
+
+    # Shell / interpreter under sudo.
+    if "shell_spawn" in caps or "interpreter" in caps:
+        if run_as == "root":
+            if nopasswd:
+                return "root_shell_primitive"
+            return "arbitrary_command_execution"
+        else:
+            return "arbitrary_command_execution"
+
+    # File write surfaces with sensitive targets.
+    if "file_write" in caps:
+        if "sensitive_file_edit_surface" in arg_risks or "sensitive_target" in arg_risks:
+            return "arbitrary_file_write_primitive"
+        return "file_write_surface"
+
+    # Exec-hook tools (find/awk/rsync) under sudo almost always mean arbitrary commands with some work.
+    if "exec_hook" in caps:
+        return "arbitrary_command_execution"
+
+    # Platform control without docker (e.g. systemctl).
+    if "platform_control" in caps:
+        return "platform_control_primitive"
+
+    # Fallback: still an escalation surface even if not clearly mapped.
+    return "sudo_exec_surface"
+
+
 def _primitive_from_finding(f: Dict[str, Any]) -> Optional[Primitive]:
     """
     Convert a sudo rule finding into an offensive primitive that the
     global chaining engine can work with.
     """
     severity_band = f["severity_band"]
+    severity_score = f["severity_score"]
     binary = f["binary"]
     caps: Set[str] = f.get("capabilities", set()) or set()
     risk_categories: Set[str] = f.get("risk_categories", set()) or set()
     nopasswd = f["nopasswd"]
     is_all_rule = f["is_all_rule"]
+    arg_risks: Set[str] = f.get("arg_risks", set()) or set()
     runas_spec = (f.get("runas_spec") or "").lower() if f.get("runas_spec") else ""
     run_as = "root" if ("root" in runas_spec or "all" in runas_spec or not runas_spec) else runas_spec
 
-    # Decide primitive type
-    primitive_type: Optional[str] = None
-
-    # Global NOPASSWD: ALL => effectively full root control
-    if is_all_rule and nopasswd:
-        primitive_type = "root_shell_primitive"
-    else:
-        # Specific binary-based powers
-        if nopasswd and "shell_spawn" in caps and run_as == "root":
-            primitive_type = "root_shell_primitive"
-        elif nopasswd and "platform_control" in caps and binary == "docker":
-            primitive_type = "docker_host_takeover"
-        elif nopasswd and "file_write" in caps and run_as == "root":
-            primitive_type = "arbitrary_file_write_primitive"
-        elif {"shell_spawn", "interpreter", "platform_control"} & caps:
-            primitive_type = "arbitrary_command_execution"
-
+    primitive_type = _primitive_type_for_finding(f)
     if not primitive_type:
-        # For now, only emit primitives for clearly offensive surfaces.
         return None
 
-    # Exploitability model
+    # Exploitability model – more honest and granular.
     if primitive_type in {"root_shell_primitive", "docker_host_takeover"} and nopasswd:
         exploitability = "trivial"
-    elif primitive_type == "arbitrary_file_write_primitive":
+    elif primitive_type in {"root_shell_primitive", "arbitrary_file_write_primitive"}:
+        exploitability = "moderate"
+    elif primitive_type in {"arbitrary_command_execution", "platform_control_primitive"}:
         exploitability = "moderate"
     else:
-        exploitability = "moderate"
+        exploitability = "advanced" if severity_band in {"Medium", "High"} else "theoretical"
 
-    # Stability model
+    # Stability – sudo surfaces are usually safe to try, but kernel / low-level stuff wouldn't be.
     if primitive_type in {"root_shell_primitive", "docker_host_takeover"}:
         stability = "safe"
+    elif primitive_type in {"arbitrary_command_execution", "arbitrary_file_write_primitive"}:
+        stability = "moderate"
     else:
         stability = "moderate"
 
-    # Noise model – sudo-based activity is typically logged but not “loud”
+    # Noise model – sudo is logged, but not a loud scanner.
     noise = "low"
 
     classification = _offensive_classification_from_band(severity_band)
 
-    confidence_score = f["confidence_score"]
-    confidence_band = f["confidence_band"]
-
-    confidence = PrimitiveConfidence(
-        score=confidence_score,
-        reason=f"Sudo rule parsed with {confidence_band} confidence, binary existence verified: {f['binary_info'].get('exists_in_path')}",
-    )
-
-    offensive_value = OffensiveValue(
-        classification=classification,
-        why=f"Sudo rule implies {primitive_type} for run_as={run_as} with severity={severity_band}.",
-    )
-
-    ctx = {
-        "rule": f["raw_rule"],
-        "binary": binary,
-        "capabilities": sorted(caps),
-        "risk_categories": sorted(risk_categories),
-        "severity_band": severity_band,
-        "severity_score": f["severity_score"],
-        "nopasswd": nopasswd,
-        "is_all_rule": is_all_rule,
-        "runas_spec": f.get("runas_spec"),
-        "gtfobins_url": f.get("gtfobins_url"),
-        "binary_info": f["binary_info"],
-    }
-
-    primitive = Primitive(
-        id=new_primitive_id("sudo", primitive_type),
-        surface="sudo",
-        type=primitive_type,
-        run_as=run_as,
-        origin_user="current_user",  # runtime probe can later refine this
-        exploitability=exploitability,
-        stability=stability,
-        noise=noise,
-        confidence=confidence,
-        offensive_value=offensive_value,
-        context=ctx,
-        conditions={
-            "requires_password": not nopasswd,
-            "requires_binary_present": True,
-        },
-        integration_flags={
-            "chaining_allowed": True,
-            "supports_persistence_extension": (primitive_type == "arbitrary_file_write_primitive"),
-            "supports_lateral_chain": False,
-        },
-        cross_refs={
-            "gtfobins": [f["gtfobins_url"]] if f.get("gtfobins_url") else [],
-            "cves": [],
-            "documentation": [],
-        },
-        defensive_impact={
-            "risk_to_system": "total_compromise" if primitive_type in {"root_shell_primitive", "docker_host_takeover"} else "high",
-            "visibility_risk": "low",
-        },
-        module_source="sudo_enum",
-        probe_source="sudo_probe",
-    )
-
-    return primitive
-
-
-# ========================= Module Entry =========================
-
-@register_module(
-    key="sudo_enum",
-    description="Analyse sudo -l output, capabilities, and potential attack chains",
-    required_triggers=["sudo_privesc_surface"],
-)
-def run(state: dict, report: Report):
-    """
-    In depth sudo analysis module.
-
-    - Uses existing sudo probe output (no extra sudo -l calls).
-    - Parses rules for NOPASSWD and escalation prone binaries.
-    - Assigns capability categories for known binaries.
-    - Quietly verifies candidate binaries exist and can execute basic probes.
-    - Computes severity and confidence scores.
-    - Builds high level attack chains with guidance from the shared framework.
-    - Emits offensive primitives for the global chaining engine.
-    - Writes human readable sections into the report.
-    """
-    sudo = state.get("sudo", {}) or {}
-    raw_stdout = sudo.get("raw_stdout") or ""
-
-    if not raw_stdout:
-        report.add_section(
-            "Sudo Analysis",
-            [
-                "No sudo output available in state. Either sudo is missing, denied, or the sudo probe did not run.",
-            ],
-        )
-        return
-
-    rules = _parse_sudo_rules(raw_stdout)
-
-    if not rules:
-        report.add_section(
-            "Sudo Analysis",
-            [
-                "sudo -l output was available but no rules could be parsed.",
-                "This may indicate a denial only response or an unusual sudo configuration.",
-            ],
-        )
-        return
-
-    findings: List[Dict[str, Any]] = []
-
-    for r in rules:
-        cmd = r.get("command", "") or ""
-        raw_rule = r["raw"]
-        nopasswd = r.get("nopasswd", False)
-        is_all_rule = r.get("is_all_rule", False)
-
-        base = _command_basename(cmd) if not is_all_rule else ""
-        gtfobins_hint = GTF0BINS_SUDO_HINTS.get(base)
-        capabilities = GTF0BINS_CAPABILITIES.get(base, set()) if base else set()
-        risk_categories = _risk_categories_for_rule(nopasswd, base, i
+    confidence_score = f["confi
