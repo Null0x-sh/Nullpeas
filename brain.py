@@ -84,7 +84,7 @@ def _build_triggers(state: dict):
     virt = runtime.get("virtualization", {}) or {}
     docker = runtime.get("docker", {}) or {}
 
-    triggers: dict = {}
+    triggers = {}
 
     triggers["is_root"] = bool(user.get("is_root"))
     triggers["in_sudo_group"] = bool(user.get("in_sudo_group"))
@@ -208,12 +208,11 @@ def _print_suggestions(state: dict):
         print()
         return
 
-    suggestions: List[str] = []
+    suggestions = []
 
     if triggers.get("passwordless_sudo_surface"):
         suggestions.append(
-            "[!] Passwordless sudo detected. Recommended: sudo_enum "
-            "to analyse NOPASSWD rules and GTFOBins-style candidates."
+            "[!] Passwordless sudo detected. Recommended: sudo_enum to analyse NOPASSWD rules and GTFOBins-style candidates."
         )
     elif triggers.get("sudo_privesc_surface"):
         suggestions.append(
@@ -228,8 +227,7 @@ def _print_suggestions(state: dict):
 
     if triggers.get("docker_escape_surface"):
         suggestions.append(
-            "[!] Docker host surface detected. Recommended: docker_enum "
-            "to analyse Docker daemon access and potential container escape paths."
+            "[!] Docker host surface detected. Recommended: docker_enum to analyse Docker daemon access and potential container escape paths."
         )
 
     if triggers.get("container_escape_surface"):
@@ -254,8 +252,8 @@ def _interactive_modules(state: dict, report: Report):
     """
     Simple interactive CLI:
     - Ask the registry which modules are applicable based on triggers
-    - Let the operator pick one
-    - Run it and append to the report
+    - Let the operator pick one, many, all, or none
+    - Run them and append to the report
     """
     triggers = state.get("triggers", {}) or {}
 
@@ -269,23 +267,55 @@ def _interactive_modules(state: dict, report: Report):
     print("=== Modules ===")
     for idx, mod in enumerate(modules, start=1):
         print(f"  {idx}) {mod['key']} - {mod['description']}")
-    print("  0) Skip")
+    print("  0) Skip all")
+    print()
+    print("Enter:")
+    print("  - A single number (e.g. 1)")
+    print("  - Multiple numbers (e.g. 1,3 or 1 3)")
+    print("  - 'a' or 'all' to run all modules")
+    print("  - 0 or empty input to skip")
     print()
 
-    choice = input("Select a module: ").strip()
+    choice_raw = input("Select modules: ").strip().lower()
 
-    if not choice.isdigit():
+    # Skip on 0 or empty
+    if choice_raw in ("", "0", "skip"):
         print("Skipping modules.")
         return
 
-    num = int(choice)
-    if num == 0 or num > len(modules):
-        print("Skipping modules.")
-        return
+    # Run all
+    if choice_raw in ("a", "all"):
+        selected_modules = modules[:]
+    else:
+        # Parse comma/space separated list
+        tokens = choice_raw.replace(",", " ").split()
+        indices: List[int] = []
+        for token in tokens:
+            if not token.isdigit():
+                continue
+            idx = int(token)
+            if 1 <= idx <= len(modules):
+                indices.append(idx)
 
-    mod = modules[num - 1]
-    print(f"Running module: {mod['key']} - {mod['description']}")
-    mod["run"](state, report)
+        if not indices:
+            print("No valid module selections detected. Skipping modules.")
+            return
+
+        # Deduplicate while preserving order
+        seen_keys = set()
+        selected_modules = []
+        for idx in indices:
+            mod = modules[idx - 1]
+            key = mod["key"]
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            selected_modules.append(mod)
+
+    # Run selected modules in order
+    for mod in selected_modules:
+        print(f"Running module: {mod['key']} - {mod['description']}")
+        mod["run"](state, report)
 
 
 # ========================= Main =========================
@@ -306,6 +336,9 @@ def main():
         path = report.write()
         print(f"[+] Report written to: {path}")
 
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
