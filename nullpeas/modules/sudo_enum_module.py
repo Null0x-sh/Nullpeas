@@ -603,4 +603,312 @@ def _primitive_from_finding(state: Dict[str, Any], f: Dict[str, Any]) -> Optiona
     else:
         stability = "moderate"
 
-    # Noise model – sudo is logged, 
+    # Noise model – sudo is logged, but it is not a port scan or brute force.
+    noise = "low"
+
+    classification = _offensive_classification_from_band(severity_band)
+
+    confidence = PrimitiveConfidence(
+        score=confidence_score,
+        reason=f"Derived from sudo rule: {raw_rule} (band: {confidence_band})",
+    )
+
+    offensive_value = OffensiveValue(
+        classification=classification,
+        why=(
+            f"Sudo rule '{raw_rule}' grants '{primitive_type}' capability when abused. "
+            f"Severity {severity_score}/10 ({severity_band}), "
+            f"confidence {confidence_score}/10 ({confidence_band})."
+        ),
+    )
+
+    context: Dict[str, Any] = {
+        "rule": raw_rule,
+        "binary": binary,
+        "run_as": run_as,
+        "nopasswd": nopasswd,
+        "is_all_rule": is_all_rule,
+        "capabilities": sorted(caps),
+        "risk_categories": sorted(risk_categories),
+        "arg_risks": sorted(arg_risks),
+        "severity_band": severity_band,
+        "severity_score": severity_score,
+        "confidence_band": confidence_band,
+        "confidence_score": confidence_score,
+    }
+
+    conditions: Dict[str, Any] = {
+        "requires_password": not nopasswd,
+        "requires_root_target": run_as == "root",
+    }
+
+    cross_refs: Dict[str, List[str]] = {
+        "gtfobins": [gtfobins_url] if gtfobins_url else [],
+        "cves": [],
+        "documentation": [],
+    }
+
+    defensive_impact: Dict[str, Any] = {
+        "misconfiguration_summary": (
+            "Sudo configuration exposes a high-value escalation surface. "
+            "If abused, this could undermine local privilege boundaries."
+        )
+    }
+
+    primitive = Primitive(
+        id=new_primitive_id("sudo", primitive_type),
+        surface="sudo",
+        type=primitive_type,
+        run_as=run_as,
+        origin_user=origin_user,
+        exploitability=exploitability,  # type: ignore[arg-type]
+        stability=stability,            # type: ignore[arg-type]
+        noise=noise,                    # type: ignore[arg-type]
+        confidence=confidence,
+        offensive_value=offensive_value,
+        context=context,
+        conditions=conditions,
+        integration_flags={"root_goal_candidate": primitive_type in {"root_shell_primitive", "docker_host_takeover"}},
+        cross_refs=cross_refs,
+        defensive_impact=defensive_impact,
+        module_source="sudo_enum",
+        probe_source="sudo",
+    )
+
+    return primitive
+
+
+# ========================= MODULE ENTRYPOINT =========================
+
+@register_module(
+    key="sudo_enum",
+    description="Analyse sudo -l output, capabilities, and potential attack chains",
+    required_triggers=["sudo_privesc_surface"],
+)
+def run(state: dict, report: Report):
+    """
+    Advanced sudo analysis module.
+
+    - Parses sudo -l output from the sudo probe.
+    - Scores each rule for severity and confidence.
+    - Classifies capabilities and risk categories.
+    - Emits structured findings for reporting.
+    - Emits offensive primitives for the chaining engine.
+    """
+    sudo_state = state.get("sudo", {}) or {}
+    raw_stdout = sudo_state.get("raw_stdout")
+
+    if not raw_stdout:
+        report.add_section(
+            "Sudo Analysis",
+            [
+                "No sudo -l output was captured by the probes.",
+                "Either sudo is not present, not configured, or the probe could not run.",
+            ],
+        )
+        return
+
+    parsed_rules = _parse_sudo_rules(raw_stdout)
+
+    if not parsed_rules:
+        report.add_section(
+            "Sudo Analysis",
+            [
+                "Sudo appears to be present, but no usable rule entries were parsed from sudo -l output.",
+                "This may indicate a minimal configuration or an environment where sudo does not grant additional privileges.",
+            ],
+        )
+        return
+
+    findings: List[Dict[str, Any]] = []
+
+    for r in parsed_rules:
+        raw_rule = r["raw"]
+        nopasswd = r["nopasswd"]
+        is_all_rule = r["is_all_rule"]
+        runas_spec = r.get("runas_spec")
+        command = r.get("command", "") or ""
+        base = _command_basename(command)
+
+        binary_info = _verify_binary_available(base) if base else {
+            "name": base,
+            "exists_in_path": False,
+            "resolved_path": None,
+            "version_check_ok": False,
+        }
+        capabilities = GTF0BINS_CAPABILITIES.get(base, set())
+        risk_categories = _risk_categories_for_rule(nopasswd, base, is_all_rule)
+        arg_risks = _analyze_arguments(command, base)
+        gtfobins_url = GTF0BINS_URLS.get(base)
+        has_gtfobins_hint = bool(gtfobins_url or GTF0BINS_SUDO_HINTS.get(base))
+
+        severity_score, severity_band = _severity_for_rule(
+            nopasswd=nopasswd,
+            binary_info=binary_info,
+            has_gtfobins_hint=has_gtfobins_hint,
+            capabilities=capabilities,
+            is_all_rule=is_all_rule,
+            risk_categories=risk_categories,
+            arg_risks=arg_risks,
+        )
+
+        confidence_score, confidence_band = _confidence_for_rule(
+            binary_info=binary_info,
+            is_all_rule=is_all_rule,
+        )
+
+        findings.append(
+            {
+                "raw_rule": raw_rule,
+                "nopasswd": nopasswd,
+                "is_all_rule": is_all_rule,
+                "runas_spec": runas_spec,
+                "command": command,
+                "binary": base or None,
+                "binary_info": binary_info,
+                "capabilities": capabilities,
+                "risk_categories": risk_categories,
+                "arg_risks": arg_risks,
+                "gtfobins_url": gtfobins_url,
+                "severity_score": severity_score,
+                "severity_band": severity_band,
+                "confidence_score": confidence_score,
+                "confidence_band": confidence_band,
+            }
+        )
+
+    # ---- Sudo Analysis section (summary) ----
+    total_rules = len(findings)
+    nopasswd_rules = sum(1 for f in findings if f["nopasswd"])
+    global_nopasswd_all = any("sudo_global_nopasswd_all" in f["risk_categories"] for f in findings)
+
+    lines: List[str] = []
+    lines.append("This section analyses sudo configuration as reported by sudo -l for the current user.")
+    lines.append("It focuses on escalation-prone rules, capability classes, and how realistic they are to abuse in practice.")
+    lines.append("")
+    lines.append("### Sudo rule summary")
+    lines.append(f"- Total parsed rules             : {total_rules}")
+    lines.append(f"- Rules with NOPASSWD            : {nopasswd_rules}")
+    lines.append(f"- Global NOPASSWD ALL present    : {global_nopasswd_all}")
+    lines.append("")
+
+    high_impact = [f for f in findings if f["severity_band"] in {"Critical", "High"}]
+    lines.append("### High impact sudo surfaces")
+    if not high_impact:
+        lines.append("- No Critical/High severity sudo rules were identified on this host.")
+    else:
+        for f in high_impact:
+            desc_binary = f["binary"] or "ALL"
+            lines.append(
+                f"- [{f['severity_band']} {f['severity_score']}/10] "
+                f"Rule: {f['raw_rule']} (binary: {desc_binary})"
+            )
+    lines.append("")
+
+    report.add_section("Sudo Analysis", lines)
+
+    # ---- Sudo Attack Chains (driven by guidance engine) ----
+    chains = _build_attack_chains(findings)
+
+    chain_lines: List[str] = []
+    chain_lines.append(
+        "This section describes high level attack chains based on sudo configuration and allowed commands."
+    )
+    chain_lines.append(
+        "Nullpeas does not execute sudo-based payloads or alter /etc/sudoers. "
+        "It explains how operators or attackers might reason about these surfaces, and how defenders can respond."
+    )
+    chain_lines.append("")
+
+    if not chains:
+        chain_lines.append("No sudo rules reached the threshold for detailed attack chain modelling.")
+        chain_lines.append(
+            "This typically indicates that sudo exists but is not obviously escalation-prone based on current heuristics."
+        )
+    else:
+        for idx, chain in enumerate(chains, start=1):
+            title = chain["title"]
+            rule = chain["rule"]
+            severity_band = chain["severity_band"]
+            severity_score = chain["severity_score"]
+            caps = chain["capabilities"]
+            guidance = chain["guidance"] or {}
+
+            chain_lines.append(f"### Chain {idx}: {title}")
+            chain_lines.append("")
+            chain_lines.append("Rule:")
+            chain_lines.append(f"- {rule}")
+            chain_lines.append("")
+            chain_lines.append("Severity:")
+            chain_lines.append(f"- {severity_band} ({severity_score}/10)")
+            chain_lines.append("")
+            if caps:
+                chain_lines.append("Capabilities:")
+                chain_lines.append(f"- {', '.join(sorted(caps))}")
+                chain_lines.append("")
+
+            nav = guidance.get("navigation") or []
+            if nav:
+                chain_lines.append("Navigation guidance (for operators):")
+                for line in nav:
+                    chain_lines.append(f"- {line}")
+                chain_lines.append("")
+
+            op_research = guidance.get("operator_research") or []
+            if op_research:
+                chain_lines.append("Operator research checklist:")
+                for item in op_research:
+                    chain_lines.append(f"- {item}")
+                chain_lines.append("")
+
+            offensive = guidance.get("offensive_steps") or []
+            if offensive:
+                chain_lines.append("High level offensive path (for red teams and threat modelling):")
+                chain_lines.append("")
+                for step_idx, step in enumerate(offensive, start=1):
+                    chain_lines.append(f"{step_idx}. {step}")
+                chain_lines.append("")
+                chain_lines.append(
+                    "Note: Nullpeas does not execute any of the above. These steps describe possible operator behaviour."
+                )
+                chain_lines.append("")
+
+            defensive = guidance.get("defensive_actions") or []
+            if defensive:
+                chain_lines.append("Defensive remediation path (for blue teams):")
+                chain_lines.append("")
+                for step_idx, action in enumerate(defensive, start=1):
+                    chain_lines.append(f"{step_idx}. {action}")
+                chain_lines.append("")
+
+            impact = guidance.get("impact") or []
+            if impact:
+                chain_lines.append("Potential impact if left unresolved:")
+                for imp in impact:
+                    chain_lines.append(f"- {imp}")
+                chain_lines.append("")
+
+            refs = guidance.get("references") or []
+            if refs:
+                chain_lines.append("References:")
+                for ref in refs:
+                    chain_lines.append(f"- {ref}")
+                chain_lines.append("")
+
+            chain_lines.append("")
+
+    report.add_section("Sudo Attack Chains", chain_lines)
+
+    # ---- Offensive primitives for chaining engine ----
+    module_primitives: List[Primitive] = []
+    for f in findings:
+        # Only bother for non-trivial surfaces
+        if f["severity_band"] not in {"Critical", "High", "Medium"}:
+            continue
+        primitive = _primitive_from_finding(state, f)
+        if primitive:
+            module_primitives.append(primitive)
+
+    if module_primitives:
+        global_list: List[Primitive] = state.setdefault("offensive_primitives", [])
+        global_list.extend(module_primitives)
