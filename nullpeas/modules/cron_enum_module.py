@@ -1,6 +1,5 @@
 from typing import Dict, Any, List, Set, Tuple, Optional
 
-from nullpeas.core.report import Report
 from nullpeas.modules import register_module
 from nullpeas.core.guidance import build_guidance, FindingContext
 from nullpeas.core.offensive_schema import (
@@ -180,8 +179,7 @@ def _cron_severity_and_confidence(
     # ----- Severity -----
     base_sev = 0.0
 
-    # Presence of root-owned system-level cron: strong surface,
-    # especially if jobs point at writable scripts (future work).
+    # Presence of root-owned system-level cron.
     if root_system > 0:
         base_sev = max(base_sev, 0.6)
 
@@ -189,7 +187,7 @@ def _cron_severity_and_confidence(
     if nonroot_system > 0:
         base_sev = max(base_sev, 0.5)
 
-    # Root-owned spool entries: often user-specific but still privileged.
+    # Root-owned spool entries.
     if root_spool > 0:
         base_sev = max(base_sev, 0.6)
 
@@ -201,7 +199,7 @@ def _cron_severity_and_confidence(
     if any_world_writable_system or any_group_writable_system:
         base_sev += 0.2
 
-    # Writable root-owned system files are essentially "edit me, get root on schedule".
+    # Writable root-owned system files: "edit me, get root on schedule".
     if any_root_system_world_writable or any_root_system_group_writable:
         base_sev += 0.3
 
@@ -226,13 +224,11 @@ def _cron_severity_and_confidence(
         severity_band = "Low"
 
     # ----- Confidence -----
-    # If we see any cron files, or a user crontab, we are reasonably confident.
     if root_system > 0 or nonroot_system > 0 or root_spool > 0 or nonroot_spool > 0 or user_crontab_ok:
         conf_score = 7.5
     else:
         conf_score = 5.0
 
-    # Writable files are usually easily verifiable.
     if (
         any_world_writable_system
         or any_group_writable_system
@@ -270,11 +266,6 @@ def _primitive_type_for_cron_surface(
 ) -> str:
     """
     Map the aggregate cron surface to an offensive primitive type.
-
-    We treat cron as:
-      - potential scheduled root execution (if root-owned system files exist),
-      - persistence for the current user,
-      - or at minimum an elevated scheduled execution surface.
     """
     root_system = classification["root_system"]
     any_root_system_world_writable = classification["any_root_system_world_writable"]
@@ -283,20 +274,16 @@ def _primitive_type_for_cron_surface(
     nonroot_spool = classification["nonroot_spool"]
 
     if any_root_system_world_writable or any_root_system_group_writable:
-        # This is extremely powerful: modify root-owned cron, wait for run.
         return "cron_root_file_write_primitive"
 
     if root_system > 0 or root_spool > 0:
-        # Root-owned cron jobs exist; with the right script hijack this is a privesc path.
         if severity_band in {"Critical", "High"}:
             return "cron_root_scheduled_execution_surface"
         return "cron_root_scheduled_surface"
 
     if user_crontab_ok or nonroot_spool > 0:
-        # Direct persistence for current user.
         return "cron_user_persistence_surface"
 
-    # Fallback – cron is present but not obviously exploitable yet.
     return "cron_scheduled_execution_surface"
 
 
@@ -312,9 +299,6 @@ def _primitive_for_cron_surface(
 ) -> Primitive:
     """
     Build a single offensive Primitive representing the cron surface.
-
-    This is intentionally high-level: the actual job content and script hijack
-    logic remains with the operator and guidance engine.
     """
     user_name = user_name or "current_user"
 
@@ -324,13 +308,11 @@ def _primitive_for_cron_surface(
         user_crontab_ok=("cron_user_crontab_present" in risk_categories),
     )
 
-    # Decide "run_as" – if root cron files exist, treat as root surface; otherwise user.
     if classification["root_system"] > 0 or classification["root_spool"] > 0:
         run_as = "root"
     else:
         run_as = user_name
 
-    # Exploitability: writable root files are nearly "edit & wait".
     any_root_system_world_writable = classification["any_root_system_world_writable"]
     any_root_system_group_writable = classification["any_root_system_group_writable"]
 
@@ -341,15 +323,13 @@ def _primitive_for_cron_surface(
     elif primitive_type == "cron_user_persistence_surface":
         exploitability = "moderate"
     else:
-        exploitability = "theoretical" if severity_band in {"Low"} else "advanced"
+        exploitability = "theoretical" if severity_band == "Low" else "advanced"
 
-    # Stability: cron is deterministic but mis-edits can break system jobs.
-    if primitive_type in {"cron_root_file_write_primitive"} and (any_root_system_world_writable or any_root_system_group_writable):
+    if primitive_type == "cron_root_file_write_primitive" and (any_root_system_world_writable or any_root_system_group_writable):
         stability = "moderate"
     else:
         stability = "safe"
 
-    # Noise: editing cron is not “scanner noisy”, but it is highly visible in config diffs.
     noise = "low"
 
     classification_band = _offensive_classification_from_band(severity_band)
@@ -387,7 +367,6 @@ def _primitive_for_cron_surface(
             "severity_score": severity_score,
         },
         conditions={
-            # Operator still needs to identify a writable script / path in many scenarios.
             "requires_writable_target": primitive_type
             in {"cron_root_scheduled_execution_surface", "cron_root_scheduled_surface"},
         },
@@ -417,17 +396,20 @@ def _primitive_for_cron_surface(
     description="Analyse cron configuration and scheduled execution surfaces",
     required_triggers=["cron_privesc_surface"],
 )
-def run(state: dict, report: Report):
+def run(state: dict, report=None):
     """
-    Cron analysis module.
+    Cron analysis module (sensor-only).
 
     - Uses existing cron probe output (no extra crontab invocations).
     - Summarises system-level cron files and per-user crontab status.
     - Assigns high level risk categories and capabilities.
     - Computes severity and confidence scores.
     - Delegates narrative guidance to the central guidance engine.
-    - Emits an offensive primitive for the chaining engine.
+    - Emits an offensive primitive into state["offensive_primitives"].
+    - Stores structured analysis for the report layer under state["analysis"]["cron"].
     """
+    analysis = state.setdefault("analysis", {})
+
     cron = state.get("cron", {}) or {}
     user = state.get("user", {}) or {}
 
@@ -437,13 +419,21 @@ def run(state: dict, report: Report):
     user_crontab_ok = (user_cron_status == "ok")
 
     if not files_meta and not user_crontab_ok:
-        report.add_section(
-            "Cron Analysis",
-            [
+        analysis["cron"] = {
+            "heading": "Cron Analysis",
+            "summary_lines": [
                 "Cron metadata is present but no cron files or user crontab entries were identified.",
                 "Either this system does not use cron heavily, or cron configuration lives outside typical paths.",
             ],
-        )
+            "classification": None,
+            "risk_categories": set(),
+            "capabilities": set(),
+            "severity_score": 0.0,
+            "severity_band": "Low",
+            "confidence_score": 5.0,
+            "confidence_band": "Medium",
+            "guidance": None,
+        }
         return
 
     classification = _classify_cron_files(files_meta)
@@ -500,7 +490,7 @@ def run(state: dict, report: Report):
         user_crontab_ok=user_crontab_ok,
     )
 
-    # Build a high-level descriptor.
+    # High-level descriptor for guidance.
     descriptor_parts: List[str] = []
     if root_system > 0:
         descriptor_parts.append(f"{root_system} root-owned system cron file(s) under /etc/cron.* or /etc/crontab")
@@ -518,7 +508,7 @@ def run(state: dict, report: Report):
 
     descriptor = "; ".join(descriptor_parts)
 
-    finding: FindingContext = {
+    finding_ctx: FindingContext = {
         "surface": "cron",
         "rule": descriptor,
         "binary": None,
@@ -536,14 +526,14 @@ def run(state: dict, report: Report):
         },
     }
 
-    # ---- Analysis section (raw facts + scoring) ----
+    guidance = build_guidance(finding_ctx)
+
+    # Summary lines for the report layer to consume later.
     lines: List[str] = []
     lines.append("This section analyses cron configuration and scheduled execution surfaces observed by Nullpeas.")
     lines.append("It uses existing cron probe output (paths, ownership, permissions) and does not modify any jobs.")
     lines.append("Severity reflects potential impact if abused; confidence reflects how likely the described surface is actually usable on this host.")
     lines.append("")
-
-    # High-level summary
     lines.append("### Cron summary")
     lines.append(f"- System cron files discovered     : {len(classification['system_files'])}")
     lines.append(f"- Root-owned system cron files     : {root_system}")
@@ -551,3 +541,16 @@ def run(state: dict, report: Report):
     lines.append(f"- Root-owned spool cron files      : {root_spool}")
     lines.append(f"- Non-root spool cron files        : {nonroot_spool}")
     lines.append(f"- Any world-writable system files  : {any_world_writable_system}")
+    lines.append(f"- Any group-writable system files  : {any_group_writable_system}")
+    lines.append(f"- Any world-writable spool files   : {any_world_writable_spool}")
+    lines.append(f"- Any group-writable spool files   : {any_group_writable_spool}")
+    lines.append(f"- User crontab present             : {user_crontab_ok}")
+    lines.append("")
+    lines.append("### Assessed cron attack surface")
+    lines.append(f"- Descriptor                       : {descriptor}")
+    lines.append(f"- Severity                         : {severity_band} ({severity_score}/10)")
+    lines.append(f"- Confidence                       : {conf_band} ({conf_score}/10)")
+    if capabilities:
+        lines.append(f"- Capability tags                  : {', '.join(sorted(capabilities))}")
+    if risk_categories:
+        lines.append(f"- Risk categories         
