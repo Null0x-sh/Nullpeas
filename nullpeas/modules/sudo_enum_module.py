@@ -201,7 +201,8 @@ def _parse_sudo_rules(raw_stdout: str) -> List[Dict[str, Any]]:
 
 def _verify_binary_available(name: str) -> Dict[str, Any]:
     """
-    Check if a binary is available in PATH and if a simple version/help call succeeds.
+    Check if a binary is available in PATH and if a simple version/help
+    call succeeds, using the new structured run_command API.
 
     This stays quiet and does not use sudo.
     """
@@ -215,24 +216,29 @@ def _verify_binary_available(name: str) -> Dict[str, Any]:
     if not name:
         return result
 
-    resolved = run_command(f"command -v {name}")
+    # ---- lookup ----
+    rc = run_command(f"command -v {name}", shell=True)
+    resolved = (rc.get("stdout") or "").strip()
+
     if not resolved:
-        resolved = run_command(f"which {name}")
+        rc = run_command(f"which {name}", shell=True)
+        resolved = (rc.get("stdout") or "").strip()
 
-    if resolved:
-        resolved = resolved.strip()
-        result["exists_in_path"] = True
-        result["resolved_path"] = resolved
+    if not resolved:
+        return result
 
-        # Try a harmless version/help probe.
-        for arg in ["--version", "-V", "-h", "--help"]:
-            code, _ = run_command(f"{resolved} {arg}", get_exit_code=True)
-            if code == 0:
-                result["version_check_ok"] = True
-                break
+    result["exists_in_path"] = True
+    result["resolved_path"] = resolved
+
+    # ---- harmless sanity probe ----
+    for arg in ["--version", "-V", "-h", "--help"]:
+        probe = run_command(f"{resolved} {arg}", shell=True)
+        if probe.get("ok") or probe.get("return_code") == 0:
+            result["version_check_ok"] = True
+            break
 
     return result
-
+    
 
 def _risk_categories_for_rule(
     nopasswd: bool,
