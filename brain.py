@@ -6,7 +6,7 @@ Nullpeas main entrypoint.
 - Runs probes (threaded)
 - Derives triggers
 - Prints summary + suggestions
-- Runs medium-level analysis modules interactively (modules mutate state only)
+- Runs medium-level analysis modules interactively (modules mutate state and/or add report sections)
 - Builds offensive attack chains from discovered primitives
 - Builds the Markdown report from state["analysis"] + chains
 - Writes a Markdown report to cache/
@@ -376,7 +376,7 @@ def _interactive_modules(state: dict, report: Report):
     Simple interactive CLI:
     - Ask the registry which modules are applicable based on triggers
     - Let the operator pick one, many, all, or none
-    - Run them and append to the report
+    - Run them; modules can mutate state and/or add sections to the report
     """
     triggers = state.get("triggers", {}) or {}
 
@@ -452,11 +452,12 @@ def main():
     _print_summary(state)
     _print_suggestions(state)
 
-    # Run interactive modules – they enrich state["analysis"] and state["offensive_primitives"]
-    _interactive_modules(state)
-
-    # Build report from state
+    # Build report object up front so modules can write into it if they want
     report = Report(title="Nullpeas Privilege Escalation Analysis")
+
+    # Run interactive modules – they enrich state["analysis"], state["offensive_primitives"],
+    # and may also add human-facing sections directly to the report.
+    _interactive_modules(state, report)
 
     # 1) Analysis sections (sudo/docker/cron/etc) from state["analysis"]
     _append_analysis_sections_to_report(state, report)
