@@ -605,6 +605,10 @@ def run(state: dict, report: Report):
     findings: List[Dict[str, Any]] = []
 
     for r in parsed_rules:
+        if r.get("denied"):
+            # Skip DENIED entries; they don't represent usable surfaces.
+            continue
+
         raw_rule = r["raw"]
         nopasswd = r["nopasswd"]
         is_all_rule = r["is_all_rule"]
@@ -612,5 +616,136 @@ def run(state: dict, report: Report):
         command = r.get("command", "") or ""
         base = _command_basename(command)
 
-        binary_info = _verify_binary_available(base) if base else {
-          
+        if base:
+            binary_info = _verify_binary_available(base)
+        else:
+            binary_info = {
+                "name": base,
+                "exists_in_path": False,
+                "resolved_path": None,
+                "version_check_ok": False,
+            }
+
+        capabilities = GTF0BINS_CAPABILITIES.get(base, set())
+        risk_categories = _risk_categories_for_rule(nopasswd, base, is_all_rule)
+        arg_risks = _analyze_arguments(command, base)
+        gtfobins_url = GTF0BINS_URLS.get(base)
+        has_gtfobins_hint = bool(gtfobins_url or GTF0BINS_SUDO_HINTS.get(base))
+
+        severity_score, severity_band = _severity_for_rule(
+            nopasswd=nopasswd,
+            binary_info=binary_info,
+            has_gtfobins_hint=has_gtfobins_hint,
+            capabilities=capabilities,
+            is_all_rule=is_all_rule,
+            risk_categories=risk_categories,
+            arg_risks=arg_risks,
+        )
+
+        confidence_score, confidence_band = _confidence_for_rule(
+            binary_info=binary_info,
+            is_all_rule=is_all_rule,
+        )
+
+        findings.append(
+            {
+                "raw_rule": raw_rule,
+                "nopasswd": nopasswd,
+                "is_all_rule": is_all_rule,
+                "runas_spec": runas_spec,
+                "command": command,
+                "binary": base or None,
+                "binary_info": binary_info,
+                "capabilities": capabilities,
+                "risk_categories": risk_categories,
+                "arg_risks": arg_risks,
+                "gtfobins_url": gtfobins_url,
+                "has_gtfobins_hint": has_gtfobins_hint,
+                "severity_score": severity_score,
+                "severity_band": severity_band,
+                "confidence_score": confidence_score,
+                "confidence_band": confidence_band,
+            }
+        )
+
+    if not findings:
+        report.add_section(
+            "Sudo Analysis",
+            [
+                "Sudo -l output did not yield any actionable rules for this user.",
+                "No escalation-prone sudo surfaces were identified by this module.",
+            ],
+        )
+        return
+
+    # ---------- Report: Sudo Analysis ----------
+    total_rules = len(findings)
+    nopasswd_rules = [f for f in findings if f["nopasswd"]]
+    global_nopasswd_all_present = any(
+        "sudo_global_nopasswd_all" in f["risk_categories"] for f in findings
+    )
+
+    lines: List[str] = []
+    lines.append("This section analyses sudo configuration as reported by sudo -l for the current user.")
+    lines.append("It focuses on escalation-prone rules, capability classes, and how realistic they are to abuse in practice.")
+    lines.append("")
+    lines.append("### Sudo rule summary")
+    lines.append(f"- Total parsed rules             : {total_rules}")
+    lines.append(f"- Rules with NOPASSWD            : {len(nopasswd_rules)}")
+    lines.append(f"- Global NOPASSWD ALL present    : {global_nopasswd_all_present}")
+    lines.append("")
+
+    high_impact = [
+        f for f in findings if f["severity_band"] in {"Critical", "High"}
+    ]
+
+    if high_impact:
+        lines.append("### High impact sudo surfaces")
+        for f in high_impact:
+            band = f["severity_band"]
+            score = f["severity_score"]
+            rule = f["raw_rule"]
+            binary = f["binary"] or ("ALL" if f["is_all_rule"] else "unknown")
+            lines.append(f"- [{band} {score}/10] Rule: {rule} (binary: {binary})")
+        lines.append("")
+    else:
+        lines.append("### High impact sudo surfaces")
+        lines.append("- None classified as High or Critical by the current scoring model.")
+        lines.append("")
+
+    report.add_section("Sudo Analysis", lines)
+
+    # ---------- Report: Sudo Attack Chains (short, local only) ----------
+    chains = _build_attack_chains(findings)
+    if chains:
+        chain_lines: List[str] = []
+        chain_lines.append(
+            "This section describes high level attack chains based on sudo configuration and allowed commands."
+        )
+        chain_lines.append(
+            "Nullpeas does not execute sudo-based payloads or alter /etc/sudoers. It explains how operators or attackers might reason about these surfaces, and how defenders can respond."
+        )
+        chain_lines.append("")
+
+        for idx, chain in enumerate(chains, start=1):
+            chain_lines.append(f"### Chain {idx}: {chain['title']}")
+            chain_lines.append("")
+            chain_lines.append("Rule:")
+            chain_lines.append(f"- {chain['rule']}")
+            chain_lines.append("")
+            chain_lines.append("Severity:")
+            chain_lines.append(f"- {chain['severity_band']} ({chain['severity_score']}/10)")
+            chain_lines.append("")
+            caps = chain.get("capabilities") or set()
+            if caps:
+                chain_lines.append("Capabilities:")
+                chain_lines.append(f"- {', '.join(sorted(caps))}")
+                chain_lines.append("")
+
+        report.add_section("Sudo Attack Chains", chain_lines)
+
+    # ---------- Offensive primitives for chaining engine ----------
+    for f in findings:
+        primitive = _primitive_from_finding(state, f)
+        if primitive:
+            state.setdefault("offensive_primitives", []).append(primitive)
