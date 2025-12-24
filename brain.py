@@ -6,8 +6,9 @@ Nullpeas main entrypoint.
 - Runs probes (threaded)
 - Derives triggers
 - Prints summary + suggestions
-- Optionally runs medium-level analysis modules interactively
+- Runs medium-level analysis modules interactively (modules mutate state only)
 - Builds offensive attack chains from discovered primitives
+- Builds the Markdown report from state["analysis"] + chains
 - Writes a Markdown report to cache/
 """
 
@@ -249,6 +250,45 @@ def _print_suggestions(state: dict):
     print()
 
 
+# ========================= Analysis → Report =========================
+
+def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
+    """
+    Convert structured module analysis under state["analysis"] into
+    human-readable report sections.
+
+    Expected per-entry schema (as produced by cron_enum, and later sudo/docker):
+      state["analysis"][surface] = {
+          "heading": "Cron Analysis",
+          "summary_lines": [...],
+          ...
+      }
+    """
+    analysis = state.get("analysis") or {}
+    if not analysis:
+        return
+
+    # Stable ordering: known surfaces first, then any others.
+    preferred_order = ["sudo", "docker", "cron"]
+    ordered_keys = []
+
+    for k in preferred_order:
+        if k in analysis:
+            ordered_keys.append(k)
+
+    for k in sorted(analysis.keys()):
+        if k not in ordered_keys:
+            ordered_keys.append(k)
+
+    for key in ordered_keys:
+        entry = analysis.get(key) or {}
+        heading = entry.get("heading") or f"{key.title()} Analysis"
+        body_lines = entry.get("summary_lines") or []
+
+        if body_lines:
+            report.add_section(heading, body_lines)
+
+
 # ========================= Offensive Chains → Report =========================
 
 def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
@@ -293,7 +333,6 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
         if line.strip():
             lines.append(line)
     lines.append("")
-
     lines.append("### Detailed Attack Chains")
     lines.append("")
 
@@ -332,12 +371,12 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
 
 # ========================= Interactive Modules =========================
 
-def _interactive_modules(state: dict, report: Report):
+def _interactive_modules(state: dict):
     """
     Simple interactive CLI:
     - Ask the registry which modules are applicable based on triggers
     - Let the operator pick one, many, all, or none
-    - Run them and append to the report
+    - Run them; modules mutate state (analysis + offensive_primitives)
     """
     triggers = state.get("triggers", {}) or {}
 
@@ -396,10 +435,15 @@ def _interactive_modules(state: dict, report: Report):
             seen_keys.add(key)
             selected_modules.append(mod)
 
-    # Run selected modules in order
+    # Run selected modules in order (state-only; report is built later from state["analysis"])
     for mod in selected_modules:
         print(f"Running module: {mod['key']} - {mod['description']}")
-        mod["run"](state, report)
+        # New contract: modules are sensors and accept (state, report=None) or (state)
+        try:
+            mod["run"](state)
+        except TypeError:
+            # Backwards-compat: some older modules may still expect (state, report)
+            mod["run"](state, None)
 
 
 # ========================= Main =========================
@@ -413,12 +457,16 @@ def main():
     _print_summary(state)
     _print_suggestions(state)
 
+    # Run interactive modules – they enrich state["analysis"] and state["offensive_primitives"]
+    _interactive_modules(state)
+
+    # Build report from state
     report = Report(title="Nullpeas Privilege Escalation Analysis")
 
-    # Interactive, operator-chosen analysis modules
-    _interactive_modules(state, report)
+    # 1) Analysis sections (sudo/docker/cron/etc) from state["analysis"]
+    _append_analysis_sections_to_report(state, report)
 
-    # Offensive chaining engine: build and append attack chains to the report
+    # 2) Offensive chaining engine section
     _append_offensive_chains_to_report(state, report)
 
     if report.sections:
