@@ -371,12 +371,12 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
 
 # ========================= Interactive Modules =========================
 
-def _interactive_modules(state: dict):
+def _interactive_modules(state: dict, report: Report):
     """
     Simple interactive CLI:
     - Ask the registry which modules are applicable based on triggers
     - Let the operator pick one, many, all, or none
-    - Run them; modules mutate state (analysis + offensive_primitives)
+    - Run them and append to the report
     """
     triggers = state.get("triggers", {}) or {}
 
@@ -435,15 +435,10 @@ def _interactive_modules(state: dict):
             seen_keys.add(key)
             selected_modules.append(mod)
 
-    # Run selected modules in order (state-only; report is built later from state["analysis"])
+    # Run selected modules in order, always with a real Report
     for mod in selected_modules:
         print(f"Running module: {mod['key']} - {mod['description']}")
-        # New contract: modules are sensors and accept (state, report=None) or (state)
-        try:
-            mod["run"](state)
-        except TypeError:
-            # Backwards-compat: some older modules may still expect (state, report)
-            mod["run"](state, None)
+        mod["run"](state, report)
 
 
 # ========================= Main =========================
