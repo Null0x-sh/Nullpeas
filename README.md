@@ -50,7 +50,7 @@ graph LR
     B -->|Sudo Access| C(Restart Service)
     C -->|Execution| D((ROOT SHELL))
     style D fill:#f9f,stroke:#333,stroke-width:4px
-
+```
 ---
 
 ### 🧠 Smart Chaining Logic
