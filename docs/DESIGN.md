@@ -1,228 +1,143 @@
-# Nullpeas Design Specification
-Living Architecture Document
+# Nullpeas Design Specification (v2.0)
+**Living Architecture Document**
 
-This document explains how Nullpeas is designed, how it thinks, how data flows, and how decisions are made. It reflects current implementation and the future direction. It will evolve as Nullpeas matures.
+This document defines the architectural principles, data flow, and decision-making logic of the Nullpeas Reasoning Engine. It reflects the current v2.0 implementation and guides future development.
 
-------------------------------------------------------------
-Core Philosophy
-------------------------------------------------------------
+---
 
-Nullpeas is not a noisy enumeration dump tool.
-It is a privilege escalation reasoning engine.
+## 1. Core Philosophy
 
-Manual first  
-Operator must always remain in control.
+**Nullpeas is not an enumerator. It is an adversarial reasoning engine.**
 
-Signal over noise  
-Prefer meaningful actionable data over thousands of useless lines.
+* **Actionable Intelligence:** We do not print raw data. We print validated attack paths.
+* **Adversarial Logic:** We model the system as a graph of relationships (File A -> Service B -> Root), not a list of files.
+* **Safety First:** We probe and reason, but we never exploit. We validate feasibility (e.g., `os.access`) without triggering alarms or corrupting state.
+* **Zero Ambiguity:** If we say it is vulnerable, we provide the exact command to exploit it.
+* **Operator Control:** The tool is an advisor, not an autopilot. The human makes the final decision.
 
-Structured not chaotic  
-Everything should be machine-readable intelligence, not random output.
+---
 
-Explain why something matters  
-Impact, exploitability, stability, noise, and truth are always explained.
+## 2. High-Level Architecture
 
-Chains over single surfaces  
-Real escalation often requires combining multiple weaknesses, so Nullpeas must recognise that.
+The system is divided into four distinct layers, operating in a strict pipeline.
 
-Safe and ethical  
-No exploitation. No destructive behaviour. Authorised testing only.
+### Layer 1: The Eyes (Probes)
+* **Role:** Fast, read-only data collection.
+* **Behavior:** Non-blocking, threaded, safe.
+* **Components:** `probes/sudo_probe.py`, `probes/suid_probe.py`, `probes/path_probe.py`.
+* **Output:** Raw State (JSON).
 
-------------------------------------------------------------
-High Level Architecture
-------------------------------------------------------------
+### Layer 2: The Cortex (Modules)
+* **Role:** Analysis and primitive generation.
+* **Behavior:** Parses raw state, identifies specific weaknesses (Primitives).
+* **Components:** `modules/sudo_enum.py`, `modules/cron_enum.py`.
+* **Output:** Offensive Primitives (Structured Objects).
 
-brain.py
-  Orchestrator and entrypoint
+### Layer 3: The Logic (Chaining Engine)
+* **Role:** Connecting the dots.
+* **Behavior:** Graph-based reasoning. Links primitives to goals (e.g., File Write + Service Restart = Persistence).
+* **Components:** `core/chaining_engine.py`.
+* **Output:** Attack Chains.
 
-nullpeas/core
-  cache.py              State writer/loader
-  report.py             Markdown + JSON reporting
-  chaining_engine.py    Multi-surface attack chain engine
-  offensive_schema.py   Structured primitive definitions
+### Layer 4: The Hands (Action Engine)
+* **Role:** Translation to reality.
+* **Behavior:** Maps abstract chains to concrete, copy-pasteable commands.
+* **Components:** `core/exploit_templates.py`.
+* **Output:** Exploit Cheat Sheet.
 
-nullpeas/probes
-  users_groups_probe.py
-  env_probe.py
-  sudo_probe.py
-  cron_probe.py
-  runtime_probe.py
+---
 
-nullpeas/modules
-  sudo_enum_module.py
-  cron_enum_module.py
-  docker_enum_module.py
+## 3. The Execution Pipeline
 
-cache/
-  state.json
+1.  **Initialization:**
+    * `brain.py` starts.
+    * Checks environment (TTY vs Non-TTY).
+    * If Non-TTY (Reverse Shell), enters **Auto-Run Mode**.
 
-Generated output
-  cache/nullpeas_report.md
+2.  **Probe Execution (Parallel):**
+    * Probes run in a thread pool.
+    * Facts are collected: `uid`, `sudo -l`, `find / -perm -4000`, `crontab -l`.
+    * **Triggers** are derived (e.g., `is_container`, `has_compiler`).
 
-------------------------------------------------------------
-Execution Flow
-------------------------------------------------------------
+3.  **Module Activation:**
+    * Orchestrator selects modules based on Triggers.
+    * Modules digest raw data and emit **Primitives**.
+    * *Example:* SUID Probe finds `/usr/bin/vim`. SUID Module identifies it as a GTFOBin and emits `root_shell_primitive`.
 
-1) Probes run
-They safely collect facts:
-who we are, sudo situation, cron exposure, runtime context, docker, etc.
-They populate the in-memory state.
+4.  **Chaining & Reasoning:**
+    * The Engine ingests all Primitives.
+    * It evaluates relationships:
+        * *Is this writable file used by a service?*
+        * *Is this SUID binary known to spawn shells?*
+    * It produces **Attack Chains** ranked by probability and impact.
 
-2) Triggers are derived
-Based on state we infer escalation surfaces such as:
-sudo privilege surface
-cron privilege surface
-docker escape surface
-container escape surface
+5.  **Action Generation:**
+    * For every High-Confidence Chain, the Action Engine looks up the template.
+    * It populates the template with dynamic data (paths, usernames).
+    * *Result:* `sudo vim -c ':!/bin/sh'`
 
-These are deterministic and conservative.
+6.  **Reporting:**
+    * **Terminal:** Immediate "Exploit Cheat Sheet" printed to STDOUT.
+    * **Markdown:** Detailed report with Mermaid.js visual attack maps.
+    * **JSON:** Structured export for automated ingestion.
 
-3) Operator chooses modules
-Nullpeas does not automatically run heavy modules unless asked.
-User can:
-run nothing
-run individual modules
-run everything applicable
+---
 
-4) Modules perform deep reasoning
-Modules do not dump output and do not write reports directly.
-Instead they enrich:
-state["analysis"]
-state["offensive_primitives"]
+## 4. State Model
 
-This separation ensures:
-modules analyse
-chain engine reasons
-report formats
+State is a singleton dictionary passed through the pipeline. It is never global, but passed explicitly.
 
-5) Attack chain engine runs
-It consumes structured offensive primitives and builds real-world escalation chains.
-Not theoretical hype.
-Not fantasy chains.
-Grounded offensive truth.
+```python
+state = {
+    "user": { ... },       # Who are we?
+    "env": { ... },        # Where are we?
+    "triggers": { ... },   # What is interesting?
+    "analysis": { ... },   # Human-readable summaries
+    "offensive_primitives": [ ... ], # The building blocks of attacks
+    "attack_chains": [ ... ]         # The full kill-chains
+}
 
-6) Reports generated
-Markdown and JSON are produced.
-Reports should read like a calm, experienced consultant wrote them.
+---
 
-------------------------------------------------------------
-State Model
-------------------------------------------------------------
+### The "Primitive" Object
+The atomic unit of offensive intelligence.
 
-Core state areas:
-state["user"]
-state["env"]
-state["triggers"]
-state["analysis"]
-state["offensive_primitives"]
+* **Surface:** Where is it? (Sudo, Cron, Path)
+* **Type:** What is it? (`file_write`, `shell_spawn`)
+* **Context:** Detailed metadata (File paths, permissions)
+* **Affected Resource:** Critical for chaining (e.g., `/etc/shadow`)
+* **Exploitability:** Trivial vs Theoretical.
 
-Offensive primitives are structured escalation intelligence.
-They include:
-surface
-capabilities
-exploitability
-stability
-noise
-confidence
-classification
-context
-defensive meaning
+---
 
-They represent escalation reality.
+## 5. Visualizer Specification
 
-------------------------------------------------------------
-Probes vs Modules
-------------------------------------------------------------
+The reporting engine utilizes **Mermaid.js** to render attack graphs.
 
-Probes:
-cheap
-safe
-read-only
-fact collectors
+* **Nodes:** Represent Steps or States (Start, File Write, Root).
+* **Edges:** Represent Actions or Dependencies.
+* **Styling:**
+    * **Purple:** SUID/Binary Vectors.
+    * **Orange:** Traps/Hijacking Vectors.
+    * **Yellow:** File Write Vectors.
+    * **Red:** Goal State (Root).
 
-Modules:
-deep reasoning
-surface validation
-risk modelling
-primitive generation
-chain candidates
+---
 
-Modules never exploit and never perform changes.
+## 6. Safety & Ethics
 
-------------------------------------------------------------
-Reporting Engine
-------------------------------------------------------------
+Nullpeas adheres to strict non-destructive constraints.
 
-Reports must stay:
-clean
-truthful
-structured
-calm
-useful
+* **No modification:** We never write to disk (except `cache/`).
+* **No exploitation:** We generate commands; we do not run them.
+* **Locale Safety:** All probes force `LC_ALL=C` to prevent parsing errors.
+* **Resource Safety:** High-intensity probes (like `find`) exclude volatile paths (`/proc`, `/sys`, `/workspaces`).
 
-They include:
-environment context
-per-surface analysis
-offensive primitives
-attack chains
-confidence and truth statements
+---
 
-Reports should double as training material and incident response clarity.
+## 7. Future Roadmap (v2.1+)
 
-------------------------------------------------------------
-Multi-Surface Attack Chain Engine
-------------------------------------------------------------
-
-True privilege escalation often requires combining multiple weaknesses.
-
-Phase 1 goal:
-deterministic two-hop chains such as:
-writable cron + root execution
-docker group + daemon control
-sudo editor + privileged file write
-
-Scoring considers:
-severity
-confidence
-exploitability
-stability
-noise realism
-
-No guessing.
-No assumptions.
-If uncertainty exists, confidence drops.
-
-Phase 2 introduces:
-up to three hop chains
-weighted certainty
-blocker awareness
-smarter analysis
-
-------------------------------------------------------------
-Safety Guarantees
-------------------------------------------------------------
-
-Nullpeas will never:
-modify the system
-execute payloads
-perform exploitation
-inflate claims
-
-If unclear:
-confidence drops
-impact becomes conservative
-truth prioritised
-
-------------------------------------------------------------
-Status
-------------------------------------------------------------
-
-Nullpeas has evolved beyond just enumeration.
-It is now a privilege escalation reasoning platform.
-
-Next areas of maturation:
-stability
-chain expansion
-refined UX
-stronger primitive library
-continued careful evolution, not hype.
+* **LXD/LXC Analysis:** Deep dive into container capabilities.
+* **Systemd Timers:** Analysis of `.timer` units as alternative persistence.
+* **Kernel Exploits:** Smart version comparison against known reliable exploits (e.g., DirtyPipe).
+* **Capability Analysis:** Parsing `getcap -r /` for subtle capability-based escalation.
