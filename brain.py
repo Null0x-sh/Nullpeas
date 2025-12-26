@@ -133,9 +133,10 @@ def _build_triggers(state: dict):
             any_world_writable = True
         if e.get("group_writable"):
             any_group_writable = True
-        if e.get("is_home_path"):
+        # Matches path_probe schema: in_home / in_tmpfs_like
+        if e.get("in_home"):
             any_home_path = True
-        if e.get("is_tmp_path"):
+        if e.get("in_tmpfs_like"):
             any_tmp_path = True
 
     triggers["path_world_writable_present"] = any_world_writable
@@ -520,3 +521,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```0
