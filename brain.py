@@ -25,6 +25,7 @@ from nullpeas.probes.env_probe import run as run_env_probe
 from nullpeas.probes.sudo_probe import run as run_sudo_probe
 from nullpeas.probes.cron_probe import run as run_cron_probe
 from nullpeas.probes.runtime_probe import run as run_runtime_probe
+from nullpeas.probes.path_probe import run as run_path_probe
 
 from nullpeas.modules import get_available_modules
 
@@ -46,13 +47,13 @@ def _run_all_probes_threaded() -> dict:
     probe_errors: dict = {}
 
     probes = [
-        ("users_groups", run_users_groups_probe),
-        ("env",          run_env_probe),
-        ("sudo",         run_sudo_probe),
-        ("cron",         run_cron_probe),
-        ("runtime",      run_runtime_probe),
-    ]
-
+    ("users_groups", run_users_groups_probe),
+    ("env",          run_env_probe),
+    ("sudo",         run_sudo_probe),
+    ("cron",         run_cron_probe),
+    ("runtime",      run_runtime_probe),
+    ("path",         run_path_probe),
+]
     with ThreadPoolExecutor(max_workers=len(probes)) as executor:
         future_map = {
             executor.submit(_run_probe_isolated, name, func): name
