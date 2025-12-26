@@ -47,7 +47,7 @@ def _run_all_probes_threaded() -> dict:
     probe_errors: dict = {}
 
     probes = [
-    ("users_groups", run_users_groups_probe),
+    ("users_groups",run_users_groups_probe),
     ("env",          run_env_probe),
     ("sudo",         run_sudo_probe),
     ("cron",         run_cron_probe),
