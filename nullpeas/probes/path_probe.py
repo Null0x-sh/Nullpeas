@@ -4,13 +4,12 @@ import stat
 import pwd
 import grp
 
+# === UPGRADE: Explicitly check effective user permissions ===
+# This detects if WE can write, regardless of whether we own it or are just in the group.
 
 def _split_path(raw: str) -> List[str]:
     """
     Split PATH into clean directory entries.
-
-    - Empty segments are dropped
-    - Deduplication is handled later if we need it
     """
     if not raw:
         return []
@@ -21,10 +20,12 @@ def _split_path(raw: str) -> List[str]:
 def _is_under_prefix(path: str, prefix: str) -> bool:
     if not path or not prefix:
         return False
-    # Normalise to avoid trivial false negatives
-    path = os.path.abspath(path)
-    prefix = os.path.abspath(prefix)
-    return path == prefix or path.startswith(prefix + os.sep)
+    try:
+        path = os.path.abspath(path)
+        prefix = os.path.abspath(prefix)
+        return path == prefix or path.startswith(prefix + os.sep)
+    except Exception:
+        return False
 
 
 def _safe_get_user(uid: int) -> str:
@@ -45,43 +46,9 @@ def run(state: Dict[str, Any]) -> None:
     """
     PATH probe.
 
-    - Reads the current PATH
-    - Inspects each directory
-    - Records ownership, permissions, and basic context flags
-    - Does not modify any filesystem state
-
-    Output schema (high level):
-
-      state["path"] = {
-          "raw": "...",
-          "entries": [
-              {
-                  "index": 0,
-                  "dir": "/usr/local/sbin",
-                  "exists": True,
-                  "is_dir": True,
-                  "is_symlink": False,
-                  "mode": "0755",
-                  "owner_uid": 0,
-                  "owner_gid": 0,
-                  "owner_name": "root",
-                  "group_name": "root",
-                  "owner_writable": True,
-                  "group_writable": False,
-                  "world_writable": False,
-                  "in_home": False,
-                  "in_tmpfs_like": False,
-              },
-              ...
-          ],
-          "summary": {
-              "total_entries": 10,
-              "existing_entries": 9,
-              "world_writable_count": 1,
-              "group_writable_count": 0,
-              "user_writable_count": 2,
-          },
-      }
+    Refactored for v2.0:
+    - Added explicit `os.access(W_OK)` check to correctly determine exploitability.
+    - Captures "can_i_write" flag for the analysis module.
     """
     try:
         raw_path = os.environ.get("PATH") or ""
@@ -92,9 +59,16 @@ def run(state: Dict[str, Any]) -> None:
 
     world_writable_count = 0
     group_writable_count = 0
-    user_writable_count = 0
+    # user_writable refers to 'owner writable' in the loop below
+    
+    # Track how many paths *we* can actually hijack
+    current_user_writable_count = 0
 
-    home_dir = os.path.expanduser("~")
+    try:
+        home_dir = os.path.expanduser("~")
+    except Exception:
+        home_dir = "/tmp" # Fallback safe path
+
     tmpfs_prefixes = ["/tmp", "/var/tmp", "/dev/shm"]
 
     for idx, segment in enumerate(_split_path(raw_path)):
@@ -103,10 +77,11 @@ def run(state: Dict[str, Any]) -> None:
             "dir": segment,
         }
 
-        # Basic symlink flag is cheap and useful for later reasoning
+        # Basic symlink flag
         entry["is_symlink"] = os.path.islink(segment)
 
         try:
+            # We use lstat to see the link itself, but access() follows links by default
             st = os.lstat(segment)
         except OSError as e:
             # Directory does not exist or is not reachable
@@ -122,6 +97,7 @@ def run(state: Dict[str, Any]) -> None:
                     "owner_writable": False,
                     "group_writable": False,
                     "world_writable": False,
+                    "can_i_write": False, # Explicit check result
                     "in_home": False,
                     "in_tmpfs_like": False,
                     "error": str(e),
@@ -142,8 +118,6 @@ def run(state: Dict[str, Any]) -> None:
         group_w = bool(mode_bits & stat.S_IWGRP)
         world_w = bool(mode_bits & stat.S_IWOTH)
 
-        if owner_w:
-            user_writable_count += 1
         if group_w:
             group_writable_count += 1
         if world_w:
@@ -151,6 +125,12 @@ def run(state: Dict[str, Any]) -> None:
 
         in_home = _is_under_prefix(segment, home_dir)
         in_tmpfs_like = any(_is_under_prefix(segment, prefix) for prefix in tmpfs_prefixes)
+
+        # === CRITICAL HARDENING: Real Permission Check ===
+        # os.access(os.W_OK) correctly handles ACLs, Read-only filesystems, and group membership logic.
+        can_i_write = os.access(segment, os.W_OK)
+        if can_i_write:
+            current_user_writable_count += 1
 
         entry.update(
             {
@@ -164,6 +144,7 @@ def run(state: Dict[str, Any]) -> None:
                 "owner_writable": owner_w,
                 "group_writable": group_w,
                 "world_writable": world_w,
+                "can_i_write": can_i_write, # <--- The most important flag for exploits
                 "in_home": in_home,
                 "in_tmpfs_like": in_tmpfs_like,
             }
@@ -179,6 +160,6 @@ def run(state: Dict[str, Any]) -> None:
             "existing_entries": sum(1 for e in entries if e.get("exists")),
             "world_writable_count": world_writable_count,
             "group_writable_count": group_writable_count,
-            "user_writable_count": user_writable_count,
+            "current_user_writable_count": current_user_writable_count, # Renamed for clarity
         },
     }
