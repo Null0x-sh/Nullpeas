@@ -3,17 +3,14 @@
 """
 Nullpeas main entrypoint.
 
-- Runs probes (threaded)
-- Derives triggers
-- Prints summary + suggestions
-- Runs medium-level analysis modules interactively (modules mutate state and/or add report sections)
-- Builds offensive attack chains from discovered primitives
-- Builds the Markdown report from state["analysis"] + chains
-- Writes a Markdown report to cache/
+Refactored for v2.0:
+- Added TTY detection to support reverse shells (auto-run mode).
+- Added Exploit Cheat Sheet reporting logic.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
+import sys  # <--- NEW: Required for TTY checks
 
 from nullpeas.core.cache import save_state
 from nullpeas.core.report import Report
@@ -309,17 +306,6 @@ def _print_suggestions(state: dict):
 
 
 def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
-    """
-    Convert structured module analysis under state["analysis"] into
-    human-readable report sections.
-
-    Expected per-entry schema (as produced by cron_enum, and later sudo/docker):
-      state["analysis"][surface] = {
-          "heading": "Cron Analysis",
-          "summary_lines": [...],
-          ...
-      }
-    """
     analysis = state.get("analysis") or {}
     if not analysis:
         return
@@ -350,12 +336,11 @@ def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
 
 def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
     """
-    Collect offensive primitives from modules, feed them into the chaining engine,
-    and append a structured Offensive Attack Chains section to the report.
+    Collect offensive primitives, build chains, and report them.
+    Includes the new 'Exploit Cheat Sheet' section.
     """
     primitives: List[Primitive] = state.get("offensive_primitives") or []
 
-    # No primitives - nothing offensive to chain
     if not primitives:
         report.add_section(
             "Offensive Attack Chains",
@@ -373,7 +358,6 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
             "Offensive Attack Chains",
             [
                 "Offensive primitives were discovered, but no meaningful attack chains could be constructed.",
-                "This usually indicates isolated opportunities rather than complete escalation paths.",
             ],
         )
         return
@@ -393,6 +377,7 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
     lines.append("### Detailed Attack Chains")
     lines.append("")
 
+    # --- Chain Details ---
     for idx, chain in enumerate(chains, start=1):
         lines.append(f"#### Chain {idx}: {chain.goal}")
         lines.append(f"- Chain ID       : `{chain.chain_id}`")
@@ -424,16 +409,36 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
 
     report.add_section("Offensive Attack Chains", lines)
 
+    # === NEW: Exploit Cheat Sheet ===
+    # Safely checks for 'exploit_commands' to avoid crashes before schema update
+    cheat_sheet_lines = []
+    for chain in chains:
+        # We use getattr() defensively here because the field might not exist
+        # in the schema yet until we update the other files.
+        cmds = getattr(chain, "exploit_commands", [])
+        if cmds:
+            cheat_sheet_lines.append(f"**Chain: {chain.goal} (ID: {chain.chain_id})**")
+            for cmd in cmds:
+                cheat_sheet_lines.append(f"```bash\n{cmd}\n```")
+            cheat_sheet_lines.append("")
+
+    if cheat_sheet_lines:
+        report.add_section(
+            "☠️ Exploit Cheat Sheet",
+            [
+                "Copy-pasteable commands derived from high-confidence chains.",
+                "⚠️  Use with caution. Understand what you are executing.",
+                ""
+            ] + cheat_sheet_lines
+        )
+
 
 # ========================= Interactive Modules =========================
 
 
 def _interactive_modules(state: dict, report: Report):
     """
-    Simple interactive CLI:
-    - Ask the registry which modules are applicable based on triggers
-    - Let the operator pick one, many, all, or none
-    - Run them; modules can mutate state and/or add sections to the report
+    Simple interactive CLI with TTY detection.
     """
     triggers = state.get("triggers", {}) or {}
 
@@ -444,6 +449,17 @@ def _interactive_modules(state: dict, report: Report):
     if not modules:
         return
 
+    # === FIX: Auto-Run for Reverse Shells ===
+    # If this is not a TTY (interactive terminal), we shouldn't ask for input.
+    if not sys.stdin.isatty():
+        print("[*] Non-interactive shell detected (no TTY).")
+        print("[*] Automatically running all applicable modules based on triggers...")
+        for mod in modules:
+            print(f"Running module: {mod['key']} - {mod['description']}")
+            mod["run"](state, report)
+        return
+
+    # === Normal Interactive Mode ===
     print("=== Modules ===")
     for idx, mod in enumerate(modules, start=1):
         print(f"  {idx}) {mod['key']} - {mod['description']}")
@@ -456,7 +472,12 @@ def _interactive_modules(state: dict, report: Report):
     print("  - 0 or empty input to skip")
     print()
 
-    choice_raw = input("Select modules: ").strip().lower()
+    try:
+        choice_raw = input("Select modules: ").strip().lower()
+    except EOFError:
+        # Fallback if input() fails unexpectedly
+        print("Input error. Skipping modules.")
+        return
 
     # Skip on 0 or empty
     if choice_raw in ("", "0", "skip"):
@@ -492,7 +513,7 @@ def _interactive_modules(state: dict, report: Report):
             seen_keys.add(key)
             selected_modules.append(mod)
 
-    # Run selected modules in order, always with a real Report
+    # Run selected modules
     for mod in selected_modules:
         print(f"Running module: {mod['key']} - {mod['description']}")
         mod["run"](state, report)
@@ -513,11 +534,10 @@ def main():
     # Build report object up front so modules can write into it if they want
     report = Report(title="Nullpeas Privilege Escalation Analysis")
 
-    # Run interactive modules - they enrich state["analysis"], state["offensive_primitives"],
-    # and may also add human-facing sections directly to the report.
+    # Run interactive modules
     _interactive_modules(state, report)
 
-    # 1) Analysis sections (sudo, docker, cron, path, etc) from state["analysis"]
+    # 1) Analysis sections
     _append_analysis_sections_to_report(state, report)
 
     # 2) Offensive chaining engine section
