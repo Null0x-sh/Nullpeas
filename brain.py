@@ -6,11 +6,12 @@ Nullpeas main entrypoint.
 Refactored for v2.0:
 - Added TTY detection to support reverse shells (auto-run mode).
 - Added Exploit Cheat Sheet reporting logic.
+- NEW: Prints Exploit Cheat Sheet directly to STDOUT for instant feedback.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
-import sys  # <--- NEW: Required for TTY checks
+import sys
 
 from nullpeas.core.cache import save_state
 from nullpeas.core.report import Report
@@ -337,7 +338,7 @@ def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
 def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
     """
     Collect offensive primitives, build chains, and report them.
-    Includes the new 'Exploit Cheat Sheet' section.
+    Includes the new 'Exploit Cheat Sheet' section which prints to STDOUT.
     """
     primitives: List[Primitive] = state.get("offensive_primitives") or []
 
@@ -409,19 +410,20 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
 
     report.add_section("Offensive Attack Chains", lines)
 
-    # === NEW: Exploit Cheat Sheet ===
-    # Safely checks for 'exploit_commands' to avoid crashes before schema update
+    # === NEW: Exploit Cheat Sheet (Report + STDOUT) ===
     cheat_sheet_lines = []
+    has_exploits = False
+
     for chain in chains:
-        # We use getattr() defensively here because the field might not exist
-        # in the schema yet until we update the other files.
         cmds = getattr(chain, "exploit_commands", [])
         if cmds:
+            has_exploits = True
             cheat_sheet_lines.append(f"**Chain: {chain.goal} (ID: {chain.chain_id})**")
             for cmd in cmds:
                 cheat_sheet_lines.append(f"```bash\n{cmd}\n```")
             cheat_sheet_lines.append("")
 
+    # 1. Add to Report
     if cheat_sheet_lines:
         report.add_section(
             "☠️ Exploit Cheat Sheet",
@@ -431,6 +433,19 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
                 ""
             ] + cheat_sheet_lines
         )
+
+    # 2. Print to Terminal (Instant Gratification)
+    if has_exploits:
+        print("\n" + "="*60)
+        print(" 🔥 EXPLOIT CHEAT SHEET (Generated High-Confidence) 🔥")
+        print("="*60)
+        for chain in chains:
+            cmds = getattr(chain, "exploit_commands", [])
+            if cmds:
+                print(f"\n[+] Goal: {chain.goal}")
+                for cmd in cmds:
+                    print(f"    $ {cmd}")
+        print("="*60 + "\n")
 
 
 # ========================= Interactive Modules =========================
@@ -450,7 +465,6 @@ def _interactive_modules(state: dict, report: Report):
         return
 
     # === FIX: Auto-Run for Reverse Shells ===
-    # If this is not a TTY (interactive terminal), we shouldn't ask for input.
     if not sys.stdin.isatty():
         print("[*] Non-interactive shell detected (no TTY).")
         print("[*] Automatically running all applicable modules based on triggers...")
@@ -475,7 +489,6 @@ def _interactive_modules(state: dict, report: Report):
     try:
         choice_raw = input("Select modules: ").strip().lower()
     except EOFError:
-        # Fallback if input() fails unexpectedly
         print("Input error. Skipping modules.")
         return
 
@@ -531,7 +544,7 @@ def main():
     _print_summary(state)
     _print_suggestions(state)
 
-    # Build report object up front so modules can write into it if they want
+    # Build report object up front
     report = Report(title="Nullpeas Privilege Escalation Analysis")
 
     # Run interactive modules
