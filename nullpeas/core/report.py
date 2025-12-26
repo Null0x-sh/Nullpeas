@@ -1,4 +1,4 @@
-from __future__ import annotations
+From __future__ import annotations
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Iterable
 import datetime
@@ -148,17 +148,26 @@ class Report:
     def _render_mermaid(self) -> List[str]:
         """
         Generates a visual graph of the attack chains using Mermaid.js syntax.
+        Updated in v2.0 to support SUID and Trap/Hijack visualization.
         """
         if not self.attack_chains:
             return []
 
         lines = ["## Visual Attack Map", "", "```mermaid", "graph TD"]
         
-        # Style definitions
+        # === Style definitions ===
+        # Standard Primitive (Blue)
         lines.append("    classDef primitive fill:#e1f5fe,stroke:#01579b,stroke-width:2px;")
+        # Root Goal (Red)
         lines.append("    classDef rootGoal fill:#ffcdd2,stroke:#b71c1c,stroke-width:4px;")
+        # File Writes (Yellow)
         lines.append("    classDef fileWrite fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;")
+        # Persistence (Green)
         lines.append("    classDef persistence fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px;")
+        # SUID Binaries (Purple) - NEW
+        lines.append("    classDef suid fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;")
+        # Traps / Path Hijacking (Orange) - NEW
+        lines.append("    classDef trap fill:#ffe0b2,stroke:#e65100,stroke-width:2px;")
 
         for idx, chain in enumerate(self.attack_chains, start=1):
             goal = chain.get("goal", "Goal")
@@ -177,12 +186,23 @@ class Report:
                 # Unique Node ID
                 node_id = f"C{idx}_S{i}"
                 
-                # Determine styling
+                # === Styling Logic ===
                 style_class = "primitive"
                 desc_lower = desc.lower()
-                if "root" in goal: style_class = "rootGoal"
-                elif "write" in desc_lower: style_class = "fileWrite"
-                elif "persistence" in desc_lower: style_class = "persistence"
+                
+                if "root" in goal: 
+                    # If this is the FINAL step of a root chain, it might be the trigger
+                    if i == len(steps) - 1:
+                        pass # Keep logic below to decide specific type
+                        
+                if "write" in desc_lower or "modify" in desc_lower: 
+                    style_class = "fileWrite"
+                elif "persistence" in desc_lower: 
+                    style_class = "persistence"
+                elif "suid" in desc_lower: 
+                    style_class = "suid"
+                elif "hijack" in desc_lower or "trap" in desc_lower or "interception" in desc_lower:
+                    style_class = "trap"
                 
                 # Sanitize label (escape quotes if needed, limit length)
                 clean_desc = desc.replace('"', "'")
@@ -291,7 +311,7 @@ class Report:
                         lines.append(f"- `{pid}`")
                 lines.append("")
 
-            # === NEW: RENDER EXPLOIT COMMANDS (Action Engine) ===
+            # === RENDER EXPLOIT COMMANDS (Action Engine) ===
             exploit_commands = c.get("exploit_commands") or []
             if exploit_commands:
                 lines.append("**⚠️  Exploit Commands:**")
@@ -300,7 +320,7 @@ class Report:
                     lines.append(cmd)
                 lines.append("```")
                 lines.append("")
-            # ====================================================
+            # ===============================================
 
             # Surfaces
             surfaces = c.get("dependent_surfaces") or c.get("surfaces") or []
@@ -420,9 +440,8 @@ class Report:
         content_lines: List[str] = []
         content_lines.extend(self._render_header())
         
-        # === NEW: Render Visual Map ===
+        # === Render Visual Map ===
         content_lines.extend(self._render_mermaid())
-        # ==============================
         
         content_lines.extend(self._render_sections())
         content_lines.extend(self._render_attack_chains())
