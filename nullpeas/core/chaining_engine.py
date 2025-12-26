@@ -22,7 +22,6 @@ from nullpeas.core.offensive_schema import (
     ChainConfidence,
     new_chain_id,
 )
-# === NEW IMPORT: The Exploit Generator ===
 from nullpeas.core.exploit_templates import generate_exploit_for_chain
 
 
@@ -99,8 +98,14 @@ def _offensive_truth_for(primitive: Primitive) -> str:
     if t == "docker_host_takeover":
         return "Docker-level control is commonly equivalent to full host compromise. This is catastrophic."
 
+    if t == "suid_primitive":
+        return "Unknown SUID binary detected. While not a known GTFOBin, SUID binaries often harbor logic bugs or buffer overflows allowing root."
+
     if t == "cron_exec_primitive":
         return "This provides timed and repeatable privileged execution. It is a persistence and escalation vector."
+    
+    if t == "path_hijack_surface":
+        return "Writable PATH directory allows interception of commands run by other users. High-value trap."
 
     if t == "arbitrary_file_write_primitive":
         return "Arbitrary privileged file write enables service hijack, persistence, and potential direct escalation."
@@ -120,7 +125,12 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
     for p in primitives:
         # Direct Root Win Chains
-        if p.type in {"root_shell_primitive", "docker_host_takeover"}:
+        # Included: Known SUIDs (root_shell_primitive), Docker, and Unknown SUIDs (suid_primitive)
+        if p.type in {"root_shell_primitive", "docker_host_takeover", "suid_primitive"}:
+            
+            # For unknown SUIDs, the confidence is naturally lower (from the primitive itself),
+            # but the goal is still root_shell.
+            
             chain = AttackChain(
                 chain_id=new_chain_id("root"),
                 goal="root_shell",
@@ -129,13 +139,13 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
                 stability=p.stability,
                 noise=p.noise,
                 classification=p.offensive_value.classification,
-                summary=f"Direct privileged execution via {p.surface}",
+                summary=f"Privileged execution via {p.surface}",
                 offensive_truth=_offensive_truth_for(p),
                 steps=[{"primitive_id": p.id, "description": f"Leverage {p.surface} privileged capability"}],
                 dependent_surfaces=[p.surface],
                 confidence=ChainConfidence(
                     score=p.confidence.score,
-                    reason=f"Derived directly from {p.surface} confirmed primitive"
+                    reason=f"Derived directly from {p.surface} primitive"
                 ),
                 time_profile={
                     "immediacy": "instant",
@@ -150,7 +160,6 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
                     "breach_likelihood": "almost_certain",
                     "impact_scope": "complete_host_compromise",
                 },
-                # === NEW: Generate Command ===
                 exploit_commands=generate_exploit_for_chain(p)
             )
             chains.append(chain)
@@ -160,14 +169,15 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
 def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
     """
-    Refactored in v2.0:
-    Now uses strict resource matching (affected_resource) to avoid "blind linking"
-    unrelated file writes to random services.
+    Handles Multi-Stage and Delayed Execution Chains.
+    Includes:
+    1. File Write -> Service Restart (Persistence)
+    2. Writable Cron Job (Timed Escalation)
+    3. PATH Hijacking (Trap Escalation)
     """
     chains = []
     
-    # Index file writes by the resource they control (e.g., "/etc/systemd/system/ssh.service")
-    # Only consider primitives where 'affected_resource' is populated by the module.
+    # Index file writes by the resource they control
     writes = {
         p.affected_resource: p 
         for p in primitives 
@@ -178,14 +188,11 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
     services = [p for p in primitives if p.surface in {"systemd", "services"}]
     
     for svc in services:
-        # The service module (not yet refactored here, but conceptually) needs to provide 
-        # the path to its config file in 'context'.
         config_path = svc.context.get("unit_file_path") or svc.context.get("config_path")
         
         if config_path and config_path in writes:
             writer = writes[config_path]
             
-            # Valid Link Found: We can write to the file this service executes/reads
             chain = AttackChain(
                 chain_id=new_chain_id("persistence"),
                 goal="persistence",
@@ -205,36 +212,63 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
                     score=min(writer.confidence.score, svc.confidence.score),
                     reason="Validated resource intersection (write->read)"
                 ),
-                # No simple one-liner exploit for multi-stage, but we could add manual steps later
                 exploit_commands=[]
             )
             chains.append(chain)
 
     # 2. Cron + Writable Script (Classic)
-    # This logic was mostly fine, but we can tighten it.
-    cron_primitives = [p for p in primitives if p.type == "cron_exec_primitive"]
+    # Includes both root-owned system files and user-level persistence hooks
+    cron_primitives = [p for p in primitives if p.type in {"cron_exec_primitive", "cron_user_persistence_surface"}]
 
     for c in cron_primitives:
+        goal = "privilege_escalation" if c.run_as == "root" else "persistence"
+        
         chain = AttackChain(
             chain_id=new_chain_id("timed"),
-            goal="privilege_escalation",
+            goal=goal,
             priority=3,
-            exploitability="moderate",
-            stability="safe",
-            noise="low",
-            classification="severe",
-            summary="Scheduled privileged execution window",
-            offensive_truth="This is delayed but nearly guaranteed privileged execution.",
+            exploitability=c.exploitability,
+            stability=c.stability,
+            noise=c.noise,
+            classification=c.offensive_value.classification,
+            summary="Scheduled execution injection",
+            offensive_truth=_offensive_truth_for(c),
             steps=[
-                {"primitive_id": c.id, "description": "Modify scheduled privileged execution path"},
+                {"primitive_id": c.id, "description": "Modify scheduled execution path/file"},
             ],
             dependent_surfaces=["cron"],
             confidence=ChainConfidence(
                 score=c.confidence.score,
-                reason="Cron execution validated"
+                reason="Verified writable cron resource"
             ),
-            # === NEW: Generate Command ===
             exploit_commands=generate_exploit_for_chain(c)
+        )
+        chains.append(chain)
+
+    # 3. PATH Hijacking (New in v2.0)
+    path_primitives = [p for p in primitives if p.type == "path_hijack_surface"]
+    
+    for p in path_primitives:
+        chain = AttackChain(
+            chain_id=new_chain_id("trap"),
+            goal="privilege_escalation", # Assume we want to trap root or a higher user
+            priority=3,
+            exploitability=p.exploitability,
+            stability="safe",
+            noise="moderate",
+            classification="severe",
+            summary=f"PATH Interception via {p.affected_resource}",
+            offensive_truth=_offensive_truth_for(p),
+            steps=[
+                {"primitive_id": p.id, "description": "Plant malicious binary in writable PATH directory"},
+                {"primitive_id": "wait", "description": "Wait for privileged user to execute command (Interception)"},
+            ],
+            dependent_surfaces=["path"],
+            confidence=ChainConfidence(
+                score=p.confidence.score,
+                reason="Verified writable PATH directory (os.access)"
+            ),
+            exploit_commands=generate_exploit_for_chain(p)
         )
         chains.append(chain)
 
