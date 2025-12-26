@@ -31,7 +31,10 @@ def _safe_read_file(path: Path) -> str:
 def _file_metadata(path: Path) -> Dict[str, Any]:
     """
     Collect permission / ownership metadata for cron-related files.
-    This is where future modules will look to detect writable cron paths.
+    
+    Refactored for v2.0:
+    - Added explicit os.access(W_OK) check to detect writable cron files.
+    - Handles ACLs correctly via os.access.
     """
     meta: Dict[str, Any] = {
         "path": str(path),
@@ -39,10 +42,15 @@ def _file_metadata(path: Path) -> Dict[str, Any]:
         "group": None,
         "mode": None,
         "size": None,
+        "can_i_write": False, # <--- NEW: High fidelity exploit signal
         "error": None,
     }
 
     try:
+        # === CRITICAL CHECK ===
+        if os.access(path, os.W_OK):
+            meta["can_i_write"] = True
+
         st = path.stat()
         meta["size"] = st.st_size
         meta["mode"] = f"{st.st_mode & 0o777:04o}"
@@ -67,7 +75,7 @@ def run(state: dict):
     cron: Dict[str, Any] = {
         "paths_checked": CRON_PATHS,
         "found_files": {},      # Backwards-compatible summary of contents
-        "files_metadata": [],   # New: structured metadata for each discovered file
+        "files_metadata": [],   # Structured metadata
         "user_crontab": {},
         "errors": [],
     }
@@ -85,11 +93,14 @@ def run(state: dict):
                     entry_path = p / entry_name
                     if not entry_path.is_file():
                         continue
+                    
+                    # Read content for analysis (looking for wildcards, relative paths, etc.)
                     content = _safe_read_file(entry_path)
                     entries.append({
                         "path": str(entry_path),
                         "content": content,
                     })
+                    # Capture metadata (permissions)
                     cron["files_metadata"].append(_file_metadata(entry_path))
 
                 if entries:
@@ -104,6 +115,7 @@ def run(state: dict):
             cron["files_metadata"].append(_file_metadata(p))
 
     # Per-user crontab (via exec helper)
+    # exec.py ensures LC_ALL=C, so output is standard English
     user_crontab: Dict[str, Any] = {}
     res = run_command(["crontab", "-l"], timeout=5)
 
@@ -117,7 +129,7 @@ def run(state: dict):
         user_crontab["status"] = "ok"
         user_crontab["content"] = res["stdout"]
     else:
-        # Non-zero return code: often "no crontab for user" or permission denied
+        # Non-zero return code: often "no crontab for user"
         user_crontab["status"] = "non_zero_exit"
         user_crontab["return_code"] = res["return_code"]
         user_crontab["stdout"] = res["stdout"]
