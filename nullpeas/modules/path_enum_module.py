@@ -1,4 +1,6 @@
-from typing import Dict, Any, List, Optional, Set, Tuple
+# nullpeas/modules/path_enum.py
+
+from typing import Dict, Any, List, Optional
 
 from nullpeas.core.report import Report
 from nullpeas.core.offensive_schema import (
@@ -10,206 +12,242 @@ from nullpeas.core.offensive_schema import (
 from nullpeas.modules import register_module
 
 
-def _attacker_group_ids(user: Dict[str, Any]) -> Set[int]:
+def _summarise_path(path_state: Dict[str, Any]) -> Dict[str, Any]:
+    entries: List[Dict[str, Any]] = path_state.get("entries") or []
+
+    total_entries = len(entries)
+    existing_entries = sum(1 for e in entries if e.get("exists"))
+    user_writable = [e for e in entries if e.get("owner_writable")]
+    group_writable = [e for e in entries if e.get("group_writable")]
+    world_writable = [e for e in entries if e.get("world_writable")]
+
+    return {
+        "total_entries": total_entries,
+        "existing_entries": existing_entries,
+        "user_writable_entries": user_writable,
+        "group_writable_entries": group_writable,
+        "world_writable_entries": world_writable,
+    }
+
+
+def _score_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Try to derive the current user's group IDs from state, with a
-    best effort fallback to os.getgroups if needed.
+    Assign a simple severity and confidence score per PATH entry.
+
+    This does not claim escalation on its own. It simply measures how strong
+    the directory is as a candidate for PATH hijack style abuse.
     """
-    group_ids: Set[int] = set()
-
-    for g in user.get("groups", []) or []:
-        gid = g.get("gid")
-        if isinstance(gid, int):
-            group_ids.add(gid)
-
-    if group_ids:
-        return group_ids
-
-    # Fallback: direct OS query (cheap and safe)
-    try:
-        import os
-
-        return set(os.getgroups())
-    except Exception:
-        return set()
-
-
-def _entry_attacker_writable(
-    entry: Dict[str, Any],
-    user_uid: Optional[int],
-    attacker_group_ids: Set[int],
-) -> bool:
-    if not entry.get("exists") or not entry.get("is_dir"):
-        return False
-
-    if entry.get("world_writable"):
-        return True
-
-    if user_uid is not None:
-        if entry.get("owner_uid") == user_uid and entry.get("owner_writable"):
-            return True
-
-    owner_gid = entry.get("owner_gid")
-    if owner_gid is not None and owner_gid in attacker_group_ids and entry.get("group_writable"):
-        return True
-
-    return False
-
-
-def _severity_for_entry(
-    attacker_writable: bool,
-    world_w: bool,
-    owner_name: Optional[str],
-    in_home: bool,
-    in_tmpfs_like: bool,
-) -> Tuple[float, str]:
-    """
-    Severity is about how powerful this PATH directory is as a hijack surface,
-    not about guaranteed root.
-
-    High level rules:
-      - World writable + on PATH is serious.
-      - Writable root-owned PATH dir is serious.
-      - User/home writable is medium.
-      - Non attacker writable is low.
-    """
-    if not attacker_writable:
-        return 1.0, "Low"
-
-    # Default assumption: attacker writable PATH is at least Medium.
-    score = 4.0
-
-    if world_w:
-        score += 2.0
-
-    if owner_name == "root":
-        score += 1.5
-
-    if in_tmpfs_like:
-        score += 0.5
+    base_score = 4.0
+    in_home = bool(entry.get("in_home"))
+    world_w = bool(entry.get("world_writable"))
 
     if in_home:
-        score += 0.5
+        base_score += 0.5
 
-    if score >= 8.5:
+    if world_w:
+        base_score += 0.5
+
+    if base_score > 10.0:
+        base_score = 10.0
+
+    severity_score = round(base_score, 1)
+    if severity_score >= 8.5:
         band = "Critical"
-    elif score >= 6.5:
+    elif severity_score >= 6.5:
         band = "High"
-    elif score >= 3.5:
+    elif severity_score >= 3.5:
         band = "Medium"
     else:
         band = "Low"
 
-    # Clamp 0.0 to 10.0 just in case
-    score = max(0.0, min(10.0, score))
-    return score, band
+    confidence_score = 8.0
+    confidence_band = "High"
+
+    return {
+        "severity_score": severity_score,
+        "severity_band": band,
+        "confidence_score": confidence_score,
+        "confidence_band": confidence_band,
+    }
 
 
-def _confidence_for_entry(
-    exists: bool,
-    is_dir: bool,
-) -> Tuple[float, str]:
-    if exists and is_dir:
-        return 8.0, "High"
-    if exists:
-        return 6.0, "Medium"
-    return 3.0, "Low"
+def _build_path_analysis_lines(path_state: Dict[str, Any]) -> List[str]:
+    summary = _summarise_path(path_state)
+    entries: List[Dict[str, Any]] = path_state.get("entries") or []
+
+    lines: List[str] = []
+    lines.append("This section analyses PATH directories for writable locations that may support execution hijack surfaces.")
+    lines.append("")
+    lines.append("### PATH summary")
+    lines.append(f"- Total PATH entries           : {summary['total_entries']}")
+    lines.append(f"- Existing PATH directories    : {summary['existing_entries']}")
+    lines.append(f"- Directly user-writable dirs  : {len(summary['user_writable_entries'])}")
+    lines.append(f"- Group-writable dirs          : {len(summary['group_writable_entries'])}")
+    lines.append(f"- World-writable dirs          : {len(summary['world_writable_entries'])}")
+    lines.append("")
+
+    writable_candidates: List[Dict[str, Any]] = [
+        e for e in entries
+        if e.get("exists") and (e.get("owner_writable") or e.get("group_writable") or e.get("world_writable"))
+    ]
+
+    if not writable_candidates:
+        lines.append("### Assessed PATH attack surface")
+        lines.append("No attacker-writable PATH directories were identified.")
+        lines.append("This does not rule out path hijack entirely, but no obvious surfaces were seen in PATH contents.")
+        return lines
+
+    lines.append("### Assessed PATH attack surface")
+    lines.append(
+        "One or more attacker-writable PATH directories were identified. "
+        "These locations are not guaranteed escalation paths by themselves, "
+        "but can be chained with sudo, cron, or service misconfigurations that rely on PATH lookup."
+    )
+    lines.append("")
+    lines.append("#### Attacker-writable PATH directories")
+
+    seen_dirs = set()
+    for entry in writable_candidates:
+        directory = entry.get("dir") or "unknown"
+        if directory in seen_dirs:
+            continue
+        seen_dirs.add(directory)
+
+        scoring = _score_entry(entry)
+        owner_name = entry.get("owner_name") or str(entry.get("owner_uid", "unknown"))
+
+        note_parts: List[str] = []
+        if entry.get("in_home"):
+            note_parts.append("under home")
+        if entry.get("in_tmpfs_like"):
+            note_parts.append("under tmp style path")
+        note_suffix = ""
+        if note_parts:
+            note_suffix = " (" + ", ".join(note_parts) + ")"
+
+        lines.append(
+            f"- [{scoring['severity_band']} {scoring['severity_score']}/10] "
+            f"{directory} (owner: {owner_name}, confidence {scoring['confidence_score']}/10 {scoring['confidence_band']}){note_suffix}"
+        )
+
+    return lines
 
 
-def _offensive_classification_from_band(severity_band: str) -> str:
-    if severity_band == "Critical":
-        return "severe"
-    if severity_band == "High":
-        return "severe"
-    if severity_band == "Medium":
-        return "useful"
-    return "niche"
-
-
-def _primitive_from_entry(
+def _build_path_primitive(
     state: Dict[str, Any],
-    entry: Dict[str, Any],
-    severity_score: float,
-    severity_band: str,
-    confidence_score: float,
-    confidence_band: str,
-) -> Primitive:
+    path_state: Dict[str, Any],
+) -> Optional[Primitive]:
+    """
+    Build a single PATH hijack surface primitive.
+
+    This does not claim escalation by itself. It is intended to be combined later
+    with sudo, service units, cron, or other surfaces in the chaining engine.
+    """
+    entries: List[Dict[str, Any]] = path_state.get("entries") or []
+    if not entries:
+        return None
+
+    writable_candidates: List[Dict[str, Any]] = [
+        e for e in entries
+        if e.get("exists") and (e.get("owner_writable") or e.get("group_writable") or e.get("world_writable"))
+    ]
+    if not writable_candidates:
+        return None
+
+    any_world = any(e.get("world_writable") for e in writable_candidates)
+    any_home = any(e.get("in_home") for e in writable_candidates)
+    any_tmp_like = any(e.get("in_tmpfs_like") for e in writable_candidates)
+
+    if any_world:
+        severity_score = 5.5
+    elif any_home or any_tmp_like:
+        severity_score = 4.5
+    else:
+        severity_score = 4.0
+
+    if severity_score >= 8.5:
+        severity_band = "Critical"
+    elif severity_score >= 6.5:
+        severity_band = "High"
+    elif severity_score >= 3.5:
+        severity_band = "Medium"
+    else:
+        severity_band = "Low"
+
+    confidence_score = 7.5
+    confidence_band = "High"
+
     user = state.get("user", {}) or {}
     origin_user = user.get("name") or "current_user"
-    user_uid = user.get("uid")
-
-    dir_path = entry.get("dir") or "unknown_path"
-    owner_name = entry.get("owner_name")
-    in_home = bool(entry.get("in_home"))
-    in_tmpfs_like = bool(entry.get("in_tmpfs_like"))
-
-    primitive_type = "path_hijack_primitive"
-    classification = _offensive_classification_from_band(severity_band)
-
-    # PATH hijack by itself is not a guaranteed root shell.
-    # Treat exploitability as advanced until combined with other surfaces.
-    exploitability = "advanced"
-    stability = "safe"
-    noise = "low"
 
     confidence = PrimitiveConfidence(
         score=confidence_score,
-        reason=f"Attacker-writable PATH directory analysed at {dir_path} (band: {confidence_band})",
-    )
-
-    offensive_value = OffensiveValue(
-        classification=classification,
-        why=(
-            f"Directory '{dir_path}' is on PATH and writable by the current user. "
-            f"It supports execution hijack if a privileged process relies on PATH lookup."
+        reason=(
+            "Derived from attacker-writable PATH entries discovered by the path probe. "
+            "Writable PATH segments are often combined with other misconfigurations to hijack execution."
         ),
     )
 
+    offensive_value = OffensiveValue(
+        classification="useful",
+        why=(
+            "Writable PATH directories provide an execution hijack candidate. "
+            "On their own they do not guarantee escalation, "
+            "but they become powerful when combined with sudo, service or cron misconfigurations."
+        ),
+    )
+
+    risky_dirs = sorted(
+        {e.get("dir") for e in writable_candidates if e.get("dir")}
+    )
+
     context: Dict[str, Any] = {
-        "dir": dir_path,
-        "owner_name": owner_name,
-        "owner_uid": entry.get("owner_uid"),
-        "owner_gid": entry.get("owner_gid"),
-        "in_home": in_home,
-        "in_tmpfs_like": in_tmpfs_like,
-        "mode": entry.get("mode"),
-        "world_writable": entry.get("world_writable"),
-        "group_writable": entry.get("group_writable"),
-        "owner_writable": entry.get("owner_writable"),
+        "writable_entries": risky_dirs,
+        "any_world_writable": any_world,
+        "any_home_path": any_home,
+        "any_tmp_like": any_tmp_like,
         "severity_band": severity_band,
         "severity_score": severity_score,
         "confidence_band": confidence_band,
         "confidence_score": confidence_score,
     }
 
-    # By itself this is not a root goal candidate, but the chaining engine
-    # can combine it with sudo/cron/systemd surfaces.
     conditions: Dict[str, Any] = {
-        "requires_privileged_consumer": True,
-        "requires_path_lookup": True,
+        "requires_additional_surface": True,
+        "example_chain_partners": ["sudo", "systemd", "cron"],
+    }
+
+    cross_refs: Dict[str, List[str]] = {
+        "gtfobins": [],
+        "cves": [],
+        "documentation": [],
+    }
+
+    defensive_impact: Dict[str, Any] = {
+        "misconfiguration_summary": (
+            "Writable PATH directories give attackers control over which binaries are executed "
+            "when privileged workloads rely on PATH lookups without fully qualified paths."
+        )
     }
 
     primitive = Primitive(
-        id=new_primitive_id("path", primitive_type),
+        id=new_primitive_id("path", "path_hijack_surface"),
         surface="path",
-        type=primitive_type,
-        run_as="dependent",           # depends on the privileged consumer
+        type="path_hijack_surface",
+        run_as=origin_user,
         origin_user=origin_user,
-        exploitability=exploitability,  # type: ignore[arg-type]
-        stability=stability,            # type: ignore[arg-type]
-        noise=noise,                    # type: ignore[arg-type]
+        exploitability="moderate",  # type: ignore[arg-type]
+        stability="safe",           # type: ignore[arg-type]
+        noise="low",                # type: ignore[arg-type]
         confidence=confidence,
         offensive_value=offensive_value,
         context=context,
         conditions=conditions,
-        integration_flags={"root_goal_candidate": False},
-        cross_refs={"gtfobins": [], "cves": [], "documentation": []},
-        defensive_impact={
-            "misconfiguration_summary": (
-                "Writable directory on PATH can be used to hijack execution when privileged "
-                "commands rely on PATH lookup."
-            )
+        integration_flags={
+            "path_hijack_candidate": True,
         },
+        cross_refs=cross_refs,
+        defensive_impact=defensive_impact,
         module_source="path_enum",
         probe_source="path",
     )
@@ -223,137 +261,28 @@ def _primitive_from_entry(
     required_triggers=["path_hijack_surface"],
 )
 def run(state: dict, report: Report):
-    """
-    PATH module.
-
-    Responsibilities:
-      - Consume path probe output.
-      - Identify attacker-writable PATH directories.
-      - Assess severity and confidence.
-      - Emit offensive primitives for the chaining engine.
-      - Add a human-readable PATH analysis section into state["analysis"].
-    """
     path_state = state.get("path", {}) or {}
-    entries: List[Dict[str, Any]] = path_state.get("entries") or []
+    entries = path_state.get("entries") or []
 
     if not entries:
-        # Nothing to analyse; avoid noisy reporting.
+        analysis = state.setdefault("analysis", {})
+        analysis["path"] = {
+            "heading": "PATH Analysis",
+            "summary_lines": [
+                "PATH probe did not report any entries. Either PATH was empty or the probe failed to capture data."
+            ],
+        }
         return
 
-    user = state.get("user", {}) or {}
-    user_uid = user.get("uid")
-    attacker_group_ids = _attacker_group_ids(user)
+    lines = _build_path_analysis_lines(path_state)
 
     analysis = state.setdefault("analysis", {})
-    offensive_primitives: List[Primitive] = state.setdefault("offensive_primitives", [])
-
-    interesting_lines: List[str] = []
-    attacker_writable_dirs: List[Dict[str, Any]] = []
-
-    for entry in entries:
-        attacker_writable = _entry_attacker_writable(entry, user_uid, attacker_group_ids)
-        if not attacker_writable:
-            continue
-
-        exists = bool(entry.get("exists"))
-        is_dir = bool(entry.get("is_dir"))
-        world_w = bool(entry.get("world_writable"))
-        owner_name = entry.get("owner_name")
-        in_home = bool(entry.get("in_home"))
-        in_tmpfs_like = bool(entry.get("in_tmpfs_like"))
-
-        severity_score, severity_band = _severity_for_entry(
-            attacker_writable=attacker_writable,
-            world_w=world_w,
-            owner_name=owner_name,
-            in_home=in_home,
-            in_tmpfs_like=in_tmpfs_like,
-        )
-
-        confidence_score, confidence_band = _confidence_for_entry(
-            exists=exists,
-            is_dir=is_dir,
-        )
-
-        dir_path = entry.get("dir") or "unknown_path"
-
-        attacker_writable_dirs.append(
-            {
-                "dir": dir_path,
-                "severity_score": severity_score,
-                "severity_band": severity_band,
-                "confidence_score": confidence_score,
-                "confidence_band": confidence_band,
-                "world_writable": world_w,
-                "owner_name": owner_name,
-                "in_home": in_home,
-                "in_tmpfs_like": in_tmpfs_like,
-            }
-        )
-
-        primitive = _primitive_from_entry(
-            state=state,
-            entry=entry,
-            severity_score=severity_score,
-            severity_band=severity_band,
-            confidence_score=confidence_score,
-            confidence_band=confidence_band,
-        )
-        offensive_primitives.append(primitive)
-
-    # Build PATH analysis narrative
-    summary = path_state.get("summary") or {}
-    total_entries = summary.get("total_entries")
-    existing_entries = summary.get("existing_entries")
-    world_writable_count = summary.get("world_writable_count")
-    group_writable_count = summary.get("group_writable_count")
-    user_writable_count = summary.get("user_writable_count")
-
-    lines: List[str] = []
-    lines.append("This section analyses PATH directories for writable locations that may support execution hijack surfaces.")
-    lines.append("")
-    lines.append("### PATH summary")
-    lines.append(f"- Total PATH entries           : {total_entries}")
-    lines.append(f"- Existing PATH directories    : {existing_entries}")
-    lines.append(f"- Directly user-writable dirs  : {user_writable_count}")
-    lines.append(f"- Group-writable dirs          : {group_writable_count}")
-    lines.append(f"- World-writable dirs          : {world_writable_count}")
-    lines.append("")
-
-    if not attacker_writable_dirs:
-        lines.append("### Assessed PATH attack surface")
-        lines.append("- No attacker-writable PATH directories were identified based on current probe data.")
-        lines.append("- PATH hijack is not a strong escalation surface on this host from the current user context.")
-    else:
-        lines.append("### Assessed PATH attack surface")
-        lines.append("- One or more attacker-writable PATH directories were identified.")
-        lines.append("- These locations are not guaranteed escalation paths by themselves, but can be chained with sudo, cron, or service misconfigurations that rely on PATH lookup.")
-        lines.append("")
-        lines.append("#### Attacker-writable PATH directories")
-        for d in attacker_writable_dirs:
-            dir_path = d["dir"]
-            sev_score = d["severity_score"]
-            sev_band = d["severity_band"]
-            conf_score = d["confidence_score"]
-            conf_band = d["confidence_band"]
-            world_w = d["world_writable"]
-            owner_name = d["owner_name"] or "unknown"
-
-            flags = []
-            if world_w:
-                flags.append("world-writable")
-            if d["in_home"]:
-                flags.append("under home")
-            if d["in_tmpfs_like"]:
-                flags.append("tmpfs-like")
-
-            flag_str = f" ({', '.join(flags)})" if flags else ""
-            lines.append(
-                f"- [{sev_band} {sev_score:.1f}/10] {dir_path} "
-                f"(owner: {owner_name}, confidence {conf_score:.1f}/10 {conf_band}){flag_str}"
-            )
-
     analysis["path"] = {
         "heading": "PATH Analysis",
         "summary_lines": lines,
     }
+
+    primitive = _build_path_primitive(state, path_state)
+    if primitive is not None:
+        primitives: List[Primitive] = state.setdefault("offensive_primitives", [])
+        primitives.append(primitive)
