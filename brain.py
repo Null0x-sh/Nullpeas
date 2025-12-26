@@ -47,13 +47,14 @@ def _run_all_probes_threaded() -> dict:
     probe_errors: dict = {}
 
     probes = [
-    ("users_groups",run_users_groups_probe),
-    ("env",          run_env_probe),
-    ("sudo",         run_sudo_probe),
-    ("cron",         run_cron_probe),
-    ("runtime",      run_runtime_probe),
-    ("path",         run_path_probe),
-]
+        ("users_groups", run_users_groups_probe),
+        ("env",          run_env_probe),
+        ("sudo",         run_sudo_probe),
+        ("cron",         run_cron_probe),
+        ("runtime",      run_runtime_probe),
+        ("path",         run_path_probe),
+    ]
+
     with ThreadPoolExecutor(max_workers=len(probes)) as executor:
         future_map = {
             executor.submit(_run_probe_isolated, name, func): name
@@ -85,6 +86,7 @@ def _build_triggers(state: dict):
     sudo = state.get("sudo", {}) or {}
     cron = state.get("cron", {}) or {}
     runtime = state.get("runtime", {}) or {}
+    path = state.get("path", {}) or {}
 
     container = runtime.get("container", {}) or {}
     virt = runtime.get("virtualization", {}) or {}
@@ -92,26 +94,56 @@ def _build_triggers(state: dict):
 
     triggers = {}
 
+    # User and groups
     triggers["is_root"] = bool(user.get("is_root"))
     triggers["in_sudo_group"] = bool(user.get("in_sudo_group"))
     triggers["in_docker_group"] = bool(user.get("in_docker_group"))
     triggers["in_lxd_group"] = bool(user.get("in_lxd_group"))
 
+    # Sudo
     triggers["sudo_rules_present"] = bool(sudo.get("has_sudo_rules"))
     triggers["sudo_passwordless_possible"] = bool(sudo.get("passwordless_possible"))
     triggers["sudo_denied_completely"] = bool(sudo.get("denied_completely"))
 
+    # Cron
     files_meta = cron.get("files_metadata") or []
     triggers["cron_files_present"] = len(files_meta) > 0
     user_cron_status = (cron.get("user_crontab") or {}).get("status")
     triggers["user_crontab_present"] = (user_cron_status == "ok")
 
+    # Runtime and docker
     triggers["in_container"] = bool(container.get("in_container"))
     triggers["container_type"] = container.get("container_type")
     triggers["virt_type"] = virt.get("type")
     triggers["virt_is_vm"] = virt.get("is_vm")
     triggers["docker_cli_present"] = bool(docker.get("binary_present"))
     triggers["docker_socket_present"] = bool(docker.get("socket_exists"))
+
+    # PATH surface from path probe
+    entries = path.get("entries") or []
+    triggers["path_entries_present"] = bool(entries)
+
+    any_world_writable = False
+    any_group_writable = False
+    any_home_path = False
+    any_tmp_path = False
+
+    for e in entries:
+        if e.get("world_writable"):
+            any_world_writable = True
+        if e.get("group_writable"):
+            any_group_writable = True
+        if e.get("is_home_path"):
+            any_home_path = True
+        if e.get("is_tmp_path"):
+            any_tmp_path = True
+
+    triggers["path_world_writable_present"] = any_world_writable
+    triggers["path_group_writable_present"] = any_group_writable
+    triggers["path_home_segment_present"] = any_home_path
+    triggers["path_tmp_segment_present"] = any_tmp_path
+
+    # Aggregated surface flags
 
     triggers["sudo_privesc_surface"] = (
         not triggers["is_root"] and triggers["sudo_rules_present"]
@@ -135,6 +167,16 @@ def _build_triggers(state: dict):
 
     triggers["container_escape_surface"] = (
         not triggers["is_root"] and triggers["in_container"]
+    )
+
+    # PATH hijack surface: any writable or user controlled PATH segment
+    triggers["path_hijack_surface"] = (
+        not triggers["is_root"]
+        and (
+            triggers["path_world_writable_present"]
+            or triggers["path_home_segment_present"]
+            or triggers["path_tmp_segment_present"]
+        )
     )
 
     state["triggers"] = triggers
@@ -240,6 +282,11 @@ def _print_suggestions(state: dict):
             "[>] Running inside a container. Future module: container_context_module."
         )
 
+    if triggers.get("path_hijack_surface"):
+        suggestions.append(
+            "[>] PATH hijack surfaces detected. Recommended: path_enum to analyse writable or user-controlled PATH segments."
+        )
+
     if not suggestions:
         suggestions.append(
             "[-] No strong privesc surfaces detected. Consider deeper review or more probes."
@@ -270,7 +317,7 @@ def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
         return
 
     # Stable ordering: known surfaces first, then any others.
-    preferred_order = ["sudo", "docker", "cron"]
+    preferred_order = ["sudo", "docker", "cron", "path"]
     ordered_keys = []
 
     for k in preferred_order:
@@ -299,7 +346,7 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
     """
     primitives: List[Primitive] = state.get("offensive_primitives") or []
 
-    # No primitives – nothing offensive to chain
+    # No primitives - nothing offensive to chain
     if not primitives:
         report.add_section(
             "Offensive Attack Chains",
@@ -411,7 +458,7 @@ def _interactive_modules(state: dict, report: Report):
     if choice_raw in ("a", "all"):
         selected_modules = modules[:]
     else:
-        # Parse comma/space separated list
+        # Parse comma or space separated list
         tokens = choice_raw.replace(",", " ").split()
         indices: List[int] = []
         for token in tokens:
@@ -456,11 +503,11 @@ def main():
     # Build report object up front so modules can write into it if they want
     report = Report(title="Nullpeas Privilege Escalation Analysis")
 
-    # Run interactive modules – they enrich state["analysis"], state["offensive_primitives"],
+    # Run interactive modules - they enrich state["analysis"], state["offensive_primitives"],
     # and may also add human-facing sections directly to the report.
     _interactive_modules(state, report)
 
-    # 1) Analysis sections (sudo/docker/cron/etc) from state["analysis"]
+    # 1) Analysis sections (sudo, docker, cron, path, etc) from state["analysis"]
     _append_analysis_sections_to_report(state, report)
 
     # 2) Offensive chaining engine section
