@@ -13,12 +13,8 @@ class Report:
     - Accept traditional module sections (text reporting) for backwards compatibility.
     - Accept structured offensive primitives.
     - Accept structured attack chains from the chaining engine.
-    - Render clean, operator-focused Markdown.
+    - Render clean, operator-focused Markdown with Visual Maps (Mermaid).
     - Export structured JSON for tooling / automation.
-
-    Notes:
-    - Does not execute exploits or modify system state.
-    - Text tone is intentionally direct and operator-centric.
     """
 
     def __init__(
@@ -91,8 +87,6 @@ class Report:
     def add_primitive(self, primitive: Any):
         """
         Accepts a Primitive dataclass OR dict.
-
-        Dataclass instances are converted to plain dicts for serialisation.
         """
         if hasattr(primitive, "__dict__"):
             primitive = primitive.__dict__
@@ -109,8 +103,6 @@ class Report:
     def add_attack_chain(self, chain: Any):
         """
         Accepts an AttackChain dataclass OR dict.
-
-        The chaining engine owns the logic; the report only presents it.
         """
         if hasattr(chain, "__dict__"):
             chain = chain.__dict__
@@ -138,8 +130,7 @@ class Report:
 
     def _render_sections(self) -> List[str]:
         """
-        Legacy module sections. Kept for now, but long-form education content
-        should be removed at the module level over time.
+        Legacy module sections.
         """
         if not self.sections:
             return []
@@ -152,12 +143,66 @@ class Report:
             lines.append("")
         return lines
 
+    # ------------------------ Visualizer (Mermaid) -------------------------
+
+    def _render_mermaid(self) -> List[str]:
+        """
+        Generates a visual graph of the attack chains using Mermaid.js syntax.
+        """
+        if not self.attack_chains:
+            return []
+
+        lines = ["## Visual Attack Map", "", "```mermaid", "graph TD"]
+        
+        # Style definitions
+        lines.append("    classDef primitive fill:#e1f5fe,stroke:#01579b,stroke-width:2px;")
+        lines.append("    classDef rootGoal fill:#ffcdd2,stroke:#b71c1c,stroke-width:4px;")
+        lines.append("    classDef fileWrite fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;")
+        lines.append("    classDef persistence fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px;")
+
+        for idx, chain in enumerate(self.attack_chains, start=1):
+            goal = chain.get("goal", "Goal")
+            
+            # Create a subgraph for each chain
+            chain_label = f"Chain {idx}: {goal.replace('_', ' ').title()}"
+            lines.append(f"    subgraph C{idx} [{chain_label}]")
+            lines.append(f"    direction TB")
+            
+            steps = chain.get("steps", [])
+            previous_node = f"Start_{idx}((Start))"
+            
+            for i, step in enumerate(steps):
+                desc = step.get("description", "Action") or "Step"
+                
+                # Unique Node ID
+                node_id = f"C{idx}_S{i}"
+                
+                # Determine styling
+                style_class = "primitive"
+                desc_lower = desc.lower()
+                if "root" in goal: style_class = "rootGoal"
+                elif "write" in desc_lower: style_class = "fileWrite"
+                elif "persistence" in desc_lower: style_class = "persistence"
+                
+                # Sanitize label (escape quotes if needed, limit length)
+                clean_desc = desc.replace('"', "'")
+                label = f"{clean_desc[:40]}..." if len(clean_desc) > 40 else clean_desc
+                
+                lines.append(f"    {node_id}[\"{label}\"]:::{style_class}")
+                lines.append(f"    {previous_node} --> {node_id}")
+                previous_node = node_id
+                
+            # End node
+            lines.append(f"    {previous_node} --> End_{idx}((({goal})))")
+            lines.append("    end")
+            
+        lines.append("```")
+        lines.append("")
+        return lines
+
     # ------------------------ Attack Chain Rendering -----------------------
 
     def _render_attack_chains_summary(self) -> List[str]:
-        """
-        Compact summary of all attack chains.
-        """
         if not self.attack_chains:
             return []
 
@@ -171,7 +216,7 @@ class Report:
         lines.append("")
 
         total = len(self.attack_chains)
-        # Sort: lowest priority number first, then by classification roughly
+        # Sort: lowest priority number first
         def _sort_key(c: Dict[str, Any]):
             return (
                 c.get("priority", 999),
@@ -187,18 +232,10 @@ class Report:
         lines.append("")
         lines.append("Nullpeas Offensive Chain Summary")
         lines.append(f"Top Chain:")
-        lines.append(
-            f" - Goal: {top.get('goal', 'unknown')}"
-        )
-        lines.append(
-            f" - Exploitability: {top.get('exploitability', 'unknown')}"
-        )
-        lines.append(
-            f" - Stability: {top.get('stability', 'unknown')}"
-        )
-        lines.append(
-            f" - Noise: {top.get('noise', 'unknown')}"
-        )
+        lines.append(f" - Goal: {top.get('goal', 'unknown')}")
+        lines.append(f" - Exploitability: {top.get('exploitability', 'unknown')}")
+        lines.append(f" - Stability: {top.get('stability', 'unknown')}")
+        lines.append(f" - Noise: {top.get('noise', 'unknown')}")
 
         offensive_truth = top.get("offensive_truth") or top.get("summary")
         if offensive_truth:
@@ -241,12 +278,11 @@ class Report:
                 lines.append(f"**Offensive reality:** {offensive_truth}")
                 lines.append("")
 
-            # Steps: typically references primitives
+            # Steps
             steps = c.get("steps") or []
             if steps:
                 lines.append("**Steps:**")
                 for step in steps:
-                    # Flexible keys to tolerate different step dict shapes
                     pid = step.get("primitive_id") or step.get("id") or "primitive"
                     desc = step.get("description") or step.get("label") or ""
                     if desc:
@@ -255,13 +291,24 @@ class Report:
                         lines.append(f"- `{pid}`")
                 lines.append("")
 
-            # Surfaces involved
+            # === NEW: RENDER EXPLOIT COMMANDS (Action Engine) ===
+            exploit_commands = c.get("exploit_commands") or []
+            if exploit_commands:
+                lines.append("**⚠️  Exploit Commands:**")
+                lines.append("```bash")
+                for cmd in exploit_commands:
+                    lines.append(cmd)
+                lines.append("```")
+                lines.append("")
+            # ====================================================
+
+            # Surfaces
             surfaces = c.get("dependent_surfaces") or c.get("surfaces") or []
             if surfaces:
                 lines.append("**Surfaces involved:** " + ", ".join(sorted(set(surfaces))))
                 lines.append("")
 
-            # Confidence block
+            # Confidence
             conf = c.get("confidence") or {}
             if conf:
                 score = conf.get("score")
@@ -273,21 +320,10 @@ class Report:
                     lines.append(f"- {reason}")
                 lines.append("")
 
-            # Optional defender-side view if present
-            defender_risk = c.get("defender_risk") or {}
-            if defender_risk:
-                lines.append("**Defender risk notes:**")
-                for k, v in defender_risk.items():
-                    lines.append(f"- {k}: {v}")
-                lines.append("")
-
             lines.append("")
         return lines
 
     def _render_attack_chains(self) -> List[str]:
-        """
-        Wrapper that renders the full offensive chain section.
-        """
         if not self.attack_chains:
             return []
 
@@ -351,6 +387,11 @@ class Report:
                 for k, v in ctx.items():
                     lines.append(f"- {k}: {v}")
 
+            # Also render affected resource if available
+            affected = p.get("affected_resource")
+            if affected:
+                 lines.append(f"- **Affected Resource:** {affected}")
+
             lines.append("")
         return lines
 
@@ -378,6 +419,11 @@ class Report:
 
         content_lines: List[str] = []
         content_lines.extend(self._render_header())
+        
+        # === NEW: Render Visual Map ===
+        content_lines.extend(self._render_mermaid())
+        # ==============================
+        
         content_lines.extend(self._render_sections())
         content_lines.extend(self._render_attack_chains())
         content_lines.extend(self._render_primitives())
@@ -399,9 +445,8 @@ class Report:
         json_path = self.write_json()
         return {"markdown": md_path, "json": json_path}
 
-    # Backwards-compat for older brain.py that calls report.write()
     def write(self, filename: str = "nullpeas_report.md") -> Path:
         """
-        Legacy shim: write only Markdown, matching older behaviour.
+        Legacy shim: write only Markdown.
         """
         return self.write_markdown(filename)
