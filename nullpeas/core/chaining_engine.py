@@ -14,7 +14,7 @@ It:
 """
 
 from __future__ import annotations
-from typing import List, Dict
+from typing import List, Dict, Optional
 from dataclasses import asdict
 from nullpeas.core.offensive_schema import (
     Primitive,
@@ -22,6 +22,8 @@ from nullpeas.core.offensive_schema import (
     ChainConfidence,
     new_chain_id,
 )
+# === NEW IMPORT: The Exploit Generator ===
+from nullpeas.core.exploit_templates import generate_exploit_for_chain
 
 
 # ----------------------------------------------------------------------
@@ -147,7 +149,9 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
                 defender_risk={
                     "breach_likelihood": "almost_certain",
                     "impact_scope": "complete_host_compromise",
-                }
+                },
+                # === NEW: Generate Command ===
+                exploit_commands=generate_exploit_for_chain(p)
             )
             chains.append(chain)
 
@@ -155,15 +159,33 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
 
 def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
+    """
+    Refactored in v2.0:
+    Now uses strict resource matching (affected_resource) to avoid "blind linking"
+    unrelated file writes to random services.
+    """
     chains = []
-    prim_lookup = _primitive_lookup(primitives)
-
-    # STEP 1: Arbitrary file write -> Systemd / Service Hijack
-    file_write = [p for p in primitives if p.type == "arbitrary_file_write_primitive"]
-    service_related = [p for p in primitives if p.surface in {"systemd", "services"}]
-
-    for fw in file_write:
-        if service_related:
+    
+    # Index file writes by the resource they control (e.g., "/etc/systemd/system/ssh.service")
+    # Only consider primitives where 'affected_resource' is populated by the module.
+    writes = {
+        p.affected_resource: p 
+        for p in primitives 
+        if p.type == "arbitrary_file_write_primitive" and p.affected_resource
+    }
+    
+    # 1. Service Hijacking (Write Config -> Restart Service)
+    services = [p for p in primitives if p.surface in {"systemd", "services"}]
+    
+    for svc in services:
+        # The service module (not yet refactored here, but conceptually) needs to provide 
+        # the path to its config file in 'context'.
+        config_path = svc.context.get("unit_file_path") or svc.context.get("config_path")
+        
+        if config_path and config_path in writes:
+            writer = writes[config_path]
+            
+            # Valid Link Found: We can write to the file this service executes/reads
             chain = AttackChain(
                 chain_id=new_chain_id("persistence"),
                 goal="persistence",
@@ -172,24 +194,27 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
                 stability="moderate",
                 noise="noticeable",
                 classification="severe",
-                summary="Privileged file write enables service hijack persistence chain",
-                offensive_truth="This chain reliably converts file write into root persistence. Real attackers love this.",
+                summary=f"Overwrite service config {config_path} via {writer.surface}",
+                offensive_truth="This chain reliably converts file write into root persistence.",
                 steps=[
-                    {"primitive_id": fw.id, "description": "Use privileged file write to alter a service execution path"},
-                    {"primitive_id": service_related[0].id, "description": "Service reload or execution results in privileged code context"},
+                    {"primitive_id": writer.id, "description": f"Modify {config_path} via {writer.surface}"},
+                    {"primitive_id": svc.id, "description": "Trigger service reload/restart"},
                 ],
-                dependent_surfaces=["filesystem", "systemd"],
+                dependent_surfaces=[writer.surface, svc.surface],
                 confidence=ChainConfidence(
-                    score=min(fw.confidence.score, service_related[0].confidence.score),
-                    reason="Both primitives are validated and realistically chainable"
+                    score=min(writer.confidence.score, svc.confidence.score),
+                    reason="Validated resource intersection (write->read)"
                 ),
+                # No simple one-liner exploit for multi-stage, but we could add manual steps later
+                exploit_commands=[]
             )
             chains.append(chain)
 
-    # STEP 2: Cron + Writable Script
-    cron = [p for p in primitives if p.type == "cron_exec_primitive"]
+    # 2. Cron + Writable Script (Classic)
+    # This logic was mostly fine, but we can tighten it.
+    cron_primitives = [p for p in primitives if p.type == "cron_exec_primitive"]
 
-    for c in cron:
+    for c in cron_primitives:
         chain = AttackChain(
             chain_id=new_chain_id("timed"),
             goal="privilege_escalation",
@@ -199,15 +224,17 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
             noise="low",
             classification="severe",
             summary="Scheduled privileged execution window",
-            offensive_truth="This is delayed but nearly guaranteed privileged execution. Strong real-world value.",
+            offensive_truth="This is delayed but nearly guaranteed privileged execution.",
             steps=[
-                {"primitive_id": c.id, "description": "Modify scheduled privileged execution path to gain power"},
+                {"primitive_id": c.id, "description": "Modify scheduled privileged execution path"},
             ],
             dependent_surfaces=["cron"],
             confidence=ChainConfidence(
                 score=c.confidence.score,
                 reason="Cron execution validated"
             ),
+            # === NEW: Generate Command ===
+            exploit_commands=generate_exploit_for_chain(c)
         )
         chains.append(chain)
 
