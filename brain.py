@@ -32,6 +32,7 @@ from nullpeas.modules import get_available_modules
 
 # ========================= Probes =========================
 
+
 def _run_probe_isolated(name, func):
     local_state = {}
     error = None
@@ -48,11 +49,11 @@ def _run_all_probes_threaded() -> dict:
 
     probes = [
         ("users_groups", run_users_groups_probe),
-        ("env",          run_env_probe),
-        ("sudo",         run_sudo_probe),
-        ("cron",         run_cron_probe),
-        ("runtime",      run_runtime_probe),
-        ("path",         run_path_probe),
+        ("env", run_env_probe),
+        ("sudo", run_sudo_probe),
+        ("cron", run_cron_probe),
+        ("runtime", run_runtime_probe),
+        ("path", run_path_probe),
     ]
 
     with ThreadPoolExecutor(max_workers=len(probes)) as executor:
@@ -81,6 +82,7 @@ def _run_all_probes_threaded() -> dict:
 
 # ========================= Triggers =========================
 
+
 def _build_triggers(state: dict):
     user = state.get("user", {}) or {}
     sudo = state.get("sudo", {}) or {}
@@ -92,7 +94,7 @@ def _build_triggers(state: dict):
     virt = runtime.get("virtualization", {}) or {}
     docker = runtime.get("docker", {}) or {}
 
-    triggers = {}
+    triggers: dict = {}
 
     # User and groups
     triggers["is_root"] = bool(user.get("is_root"))
@@ -109,7 +111,7 @@ def _build_triggers(state: dict):
     files_meta = cron.get("files_metadata") or []
     triggers["cron_files_present"] = len(files_meta) > 0
     user_cron_status = (cron.get("user_crontab") or {}).get("status")
-    triggers["user_crontab_present"] = (user_cron_status == "ok")
+    triggers["user_crontab_present"] = user_cron_status == "ok"
 
     # Runtime and docker
     triggers["in_container"] = bool(container.get("in_container"))
@@ -133,7 +135,6 @@ def _build_triggers(state: dict):
             any_world_writable = True
         if e.get("group_writable"):
             any_group_writable = True
-        # Matches path_probe schema: in_home / in_tmpfs_like
         if e.get("in_home"):
             any_home_path = True
         if e.get("in_tmpfs_like"):
@@ -185,6 +186,7 @@ def _build_triggers(state: dict):
 
 # ========================= Output =========================
 
+
 def _print_summary(state: dict):
     user = state.get("user", {})
     env = state.get("env", {})
@@ -203,7 +205,11 @@ def _print_summary(state: dict):
 
     print("=== Environment ===")
     print(f"  Hostname  : {env.get('hostname')}")
-    pretty_os = env.get("os_pretty_name") or env.get("os_id") or env.get("platform_system")
+    pretty_os = (
+        env.get("os_pretty_name")
+        or env.get("os_id")
+        or env.get("platform_system")
+    )
     print(f"  OS        : {pretty_os}")
     print(f"  Kernel    : {env.get('kernel_release')}")
     print(f"  Arch      : {env.get('architecture')}")
@@ -257,7 +263,7 @@ def _print_suggestions(state: dict):
         print()
         return
 
-    suggestions = []
+    suggestions: List[str] = []
 
     if triggers.get("passwordless_sudo_surface"):
         suggestions.append(
@@ -299,7 +305,8 @@ def _print_suggestions(state: dict):
     print()
 
 
-# ========================= Analysis → Report =========================
+# ========================= Analysis -> Report =========================
+
 
 def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
     """
@@ -319,7 +326,7 @@ def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
 
     # Stable ordering: known surfaces first, then any others.
     preferred_order = ["sudo", "docker", "cron", "path"]
-    ordered_keys = []
+    ordered_keys: List[str] = []
 
     for k in preferred_order:
         if k in analysis:
@@ -338,7 +345,8 @@ def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
             report.add_section(heading, body_lines)
 
 
-# ========================= Offensive Chains → Report =========================
+# ========================= Offensive Chains -> Report =========================
+
 
 def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
     """
@@ -401,7 +409,7 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
         for step in chain.steps:
             pid = step.get("primitive_id")
             desc = step.get("description", "").strip() or "Unnamed step"
-            lines.append(f"- `{pid}` → {desc}")
+            lines.append(f"- `{pid}` -> {desc}")
         lines.append("")
 
         if chain.dependent_surfaces:
@@ -410,8 +418,7 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
             lines.append("")
 
         lines.append(
-            f"**Confidence:** {chain.confidence.score}/10 "
-            f"({chain.confidence.reason})"
+            f"**Confidence:** {chain.confidence.score}/10 ({chain.confidence.reason})"
         )
         lines.append("")
 
@@ -419,6 +426,7 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
 
 
 # ========================= Interactive Modules =========================
+
 
 def _interactive_modules(state: dict, report: Report):
     """
@@ -492,6 +500,7 @@ def _interactive_modules(state: dict, report: Report):
 
 # ========================= Main =========================
 
+
 def main():
     state = _run_all_probes_threaded()
     _build_triggers(state)
@@ -521,4 +530,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```0
