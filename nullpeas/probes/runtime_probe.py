@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -118,24 +119,24 @@ def _virtualization_info() -> Dict[str, Any]:
 
 def _docker_info() -> Dict[str, Any]:
     """
-    Host-level docker information (as much as we can safely infer):
-      - is the docker binary present?
-      - does /var/run/docker.sock exist and what are its basic perms?
+    Host-level docker information.
+    Hardened v2.0: Now performs explicit Write Access checks on the socket.
     """
     info: Dict[str, Any] = {
         "binary_present": False,
         "version_query_ok": False,
-        "version": None,
+        "version_info": None,   # Renamed from 'version' to match module
         "socket_path": "/var/run/docker.sock",
         "socket_exists": False,
+        "socket_writable": False, # <--- NEW: Critical for exploit logic
         "socket_mode": None,
-        "socket_owner": None,
-        "socket_group": None,
+        "socket_uid": None,       # Renamed from 'socket_owner'
+        "socket_gid": None,       # Renamed from 'socket_group'
         "socket_error": None,
         "error": None,
     }
 
-    # Check docker binary & version (read-only, times out)
+    # Check docker binary & version
     res = run_command(["docker", "version", "--format", "{{.Client.Version}}"], timeout=3)
 
     if res["binary_missing"]:
@@ -144,21 +145,27 @@ def _docker_info() -> Dict[str, Any]:
         info["binary_present"] = True
         if res["ok"]:
             info["version_query_ok"] = True
-            info["version"] = res["stdout"] or None
+            info["version_info"] = res["stdout"] or None
         elif res["timed_out"]:
             info["error"] = "docker version query timed out"
         elif res["error"]:
             info["error"] = res["error"]
 
-    # Socket metadata (we don't try to connect to it here)
+    # Socket metadata
     sock = Path(info["socket_path"])
     if sock.exists():
         info["socket_exists"] = True
+        
+        # === CRITICAL FIX: Explicitly check write permission ===
+        # This catches world-writable sockets even if we aren't in the group.
+        if os.access(sock, os.W_OK):
+            info["socket_writable"] = True
+            
         try:
             st = sock.stat()
             info["socket_mode"] = f"{st.st_mode & 0o777:04o}"
-            info["socket_owner"] = st.st_uid
-            info["socket_group"] = st.st_gid
+            info["socket_uid"] = st.st_uid # Fix naming for module
+            info["socket_gid"] = st.st_gid # Fix naming for module
         except Exception as e:
             info["socket_error"] = str(e)
 
