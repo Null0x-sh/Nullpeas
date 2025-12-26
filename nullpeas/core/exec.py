@@ -1,12 +1,10 @@
-# NullPEAS first helper
-
+# nullpeas/core/exec.py
+import os
 import shutil
 import subprocess
-from typing import List, Union, Optional, Dict, Any
-
+from typing import List, Union, Dict, Any
 
 DEFAULT_TIMEOUT = 5
-
 
 def run_command(
     cmd: Union[List[str], str],
@@ -16,23 +14,10 @@ def run_command(
 ) -> Dict[str, Any]:
     """
     Centralised wrapper around subprocess.run used by all probes.
-
-    Returns a structured dict so callers don't need to worry about exceptions
-    or low-level subprocess details.
-
-    Keys in the returned dict:
-        cmd: original command (list or string)
-        shell: whether shell mode was used
-        timeout: timeout passed in seconds
-
-        ok: True if return_code == 0
-        stdout: command stdout (string, possibly stripped)
-        stderr: command stderr (string, possibly stripped)
-        return_code: process return code (int or None)
-
-        timed_out: True if the command hit the timeout
-        binary_missing: True if the binary was not found (when shell=False)
-        error: string description on unexpected error (else None)
+    
+    UPGRADES in v2:
+    - Forces LC_ALL=C to ensure command output is always in English (critical for parsing).
+    - Safely handles environment variables.
     """
 
     result: Dict[str, Any] = {
@@ -56,12 +41,18 @@ def run_command(
         return result
 
     # Pre-check binary when not using shell to avoid ugly OSErrors
-    if not shell and isinstance(cmd, list):
+    if not shell and isinstance(cmd, list) and cmd:
         binary = cmd[0]
         if shutil.which(binary) is None:
             result["binary_missing"] = True
             result["error"] = f"binary '{binary}' not found"
             return result
+
+    # === FIX: Force English Locale for consistent parsing ===
+    # We copy the current environment to keep PATH, but override language.
+    safe_env = os.environ.copy()
+    safe_env["LC_ALL"] = "C"
+    safe_env["LANG"] = "C"
 
     try:
         proc = subprocess.run(
@@ -70,6 +61,7 @@ def run_command(
             text=True,
             timeout=timeout,
             shell=shell,
+            env=safe_env,  # <--- The Critical Fix
         )
 
         stdout = proc.stdout or ""
