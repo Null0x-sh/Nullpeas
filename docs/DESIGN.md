@@ -96,6 +96,7 @@ state = {
     "offensive_primitives": [ ... ], # The building blocks of attacks
     "attack_chains": [ ... ]         # The full kill-chains
 }
+```
 
 ---
 
