@@ -10,16 +10,6 @@ from nullpeas.core.offensive_schema import (
 )
 
 
-def _mode_world_group_bits(mode_str: str) -> Tuple[bool, bool]:
-    try:
-        mode_int = int(mode_str, 8)
-    except Exception:
-        return False, False
-    world_write = bool(mode_int & 0o002)
-    group_write = bool(mode_int & 0o020)
-    return world_write, group_write
-
-
 def _is_system_cron_path(path: str) -> bool:
     if not path:
         return False
@@ -63,48 +53,36 @@ def _classify_cron_files(files_meta: List[Dict[str, Any]]) -> Dict[str, Any]:
     nonroot_system = 0
     root_spool = 0
     nonroot_spool = 0
-
-    any_world_writable_system = False
-    any_group_writable_system = False
-    any_world_writable_spool = False
-    any_group_writable_spool = False
-    any_root_system_world_writable = False
-    any_root_system_group_writable = False
+    
+    # === NEW: Track verified writable files ===
+    writable_system_files: List[str] = []
+    writable_spool_files: List[str] = []
 
     for fm in system_files:
-        path = fm.get("path") or ""
         owner = fm.get("owner") or ""
-        mode = fm.get("mode") or ""
-
+        path = fm.get("path") or ""
+        
         if owner == "root":
             root_system += 1
         else:
             nonroot_system += 1
 
-        world_access, group_access = _mode_world_group_bits(mode)
-        if world_access:
-            any_world_writable_system = True
-            if owner == "root":
-                any_root_system_world_writable = True
-        if group_access:
-            any_group_writable_system = True
-            if owner == "root":
-                any_root_system_group_writable = True
+        # High Fidelity Check
+        if fm.get("can_i_write"):
+            writable_system_files.append(path)
 
     for fm in spool_files:
         owner = fm.get("owner") or ""
-        mode = fm.get("mode") or ""
-
+        path = fm.get("path") or ""
+        
         if owner == "root":
             root_spool += 1
         else:
             nonroot_spool += 1
-
-        world_access, group_access = _mode_world_group_bits(mode)
-        if world_access:
-            any_world_writable_spool = True
-        if group_access:
-            any_group_writable_spool = True
+            
+        # High Fidelity Check
+        if fm.get("can_i_write"):
+            writable_spool_files.append(path)
 
     return {
         "system_files": system_files,
@@ -113,12 +91,9 @@ def _classify_cron_files(files_meta: List[Dict[str, Any]]) -> Dict[str, Any]:
         "nonroot_system": nonroot_system,
         "root_spool": root_spool,
         "nonroot_spool": nonroot_spool,
-        "any_world_writable_system": any_world_writable_system,
-        "any_group_writable_system": any_group_writable_system,
-        "any_world_writable_spool": any_world_writable_spool,
-        "any_group_writable_spool": any_group_writable_spool,
-        "any_root_system_world_writable": any_root_system_world_writable,
-        "any_root_system_group_writable": any_root_system_group_writable,
+        "writable_system_files": writable_system_files,
+        "writable_spool_files": writable_spool_files,
+        "any_writable": bool(writable_system_files or writable_spool_files),
     }
 
 
@@ -126,42 +101,25 @@ def _cron_severity_and_confidence(
     classification: Dict[str, Any],
     user_crontab_ok: bool,
 ) -> Tuple[Tuple[float, str], Tuple[float, str]]:
-    root_system = classification["root_system"]
-    nonroot_system = classification["nonroot_system"]
-    root_spool = classification["root_spool"]
-    nonroot_spool = classification["nonroot_spool"]
-
-    any_world_writable_system = classification["any_world_writable_system"]
-    any_group_writable_system = classification["any_group_writable_system"]
-    any_world_writable_spool = classification["any_world_writable_spool"]
-    any_group_writable_spool = classification["any_group_writable_spool"]
-    any_root_system_world_writable = classification["any_root_system_world_writable"]
-    any_root_system_group_writable = classification["any_root_system_group_writable"]
-
+    
+    any_writable = classification["any_writable"]
+    writable_system = classification["writable_system_files"]
+    
+    # Baseline
     base_sev = 0.0
+    
+    # Presence of files increases score slightly
+    if classification["root_system"] > 0: base_sev = max(base_sev, 0.4)
+    if classification["root_spool"] > 0: base_sev = max(base_sev, 0.4)
+    if user_crontab_ok: base_sev = max(base_sev, 0.3)
 
-    if root_system > 0:
-        base_sev = max(base_sev, 0.6)
-    if nonroot_system > 0:
-        base_sev = max(base_sev, 0.5)
-    if root_spool > 0:
-        base_sev = max(base_sev, 0.6)
-    if nonroot_spool > 0:
-        base_sev = max(base_sev, 0.4)
-
-    if any_world_writable_system or any_group_writable_system:
-        base_sev += 0.2
-
-    if any_root_system_world_writable or any_root_system_group_writable:
-        base_sev += 0.3
-
-    if any_world_writable_spool or any_group_writable_spool:
-        base_sev += 0.15
-
-    if user_crontab_ok:
-        base_sev = max(base_sev, 0.5)
-
-    base_sev = max(0.0, min(1.0, base_sev))
+    # === SCORING LOGIC ===
+    # If we can write to a system cron file, that is effectively root.
+    if writable_system:
+        base_sev = 1.0  # Critical
+    elif any_writable:
+        base_sev = 0.9  # High (Spool might be user-level, but still dangerous)
+    
     severity_score = round(base_sev * 10.0, 1)
 
     if severity_score >= 8.5:
@@ -173,20 +131,13 @@ def _cron_severity_and_confidence(
     else:
         severity_band = "Low"
 
-    if root_system > 0 or nonroot_system > 0 or root_spool > 0 or nonroot_spool > 0 or user_crontab_ok:
-        conf_score = 7.5
-    else:
-        conf_score = 5.0
-
-    if (
-        any_world_writable_system
-        or any_group_writable_system
-        or any_world_writable_spool
-        or any_group_writable_spool
-    ):
-        conf_score += 0.5
-
-    conf_score = max(0.0, min(10.0, conf_score))
+    # Confidence
+    conf_score = 5.0
+    if any_writable:
+        # We verified access with os.access, so confidence is max
+        conf_score = 9.5
+    elif classification["root_system"] > 0 or user_crontab_ok:
+        conf_score = 7.0
 
     if conf_score >= 8.0:
         conf_band = "High"
@@ -213,21 +164,18 @@ def _primitive_type_for_cron_surface(
     severity_band: str,
     user_crontab_ok: bool,
 ) -> str:
-    root_system = classification["root_system"]
-    any_root_system_world_writable = classification["any_root_system_world_writable"]
-    any_root_system_group_writable = classification["any_root_system_group_writable"]
-    root_spool = classification["root_spool"]
-    nonroot_spool = classification["nonroot_spool"]
+    writable_system = classification["writable_system_files"]
+    any_writable = classification["any_writable"]
 
-    if any_root_system_world_writable or any_root_system_group_writable:
-        return "cron_root_file_write_primitive"
+    # 1. Root File Write (The Jackpot)
+    if writable_system:
+        return "cron_exec_primitive" # Maps to exploit template
+    
+    if any_writable:
+        # Writable spool or other non-system cron
+        return "cron_exec_primitive"
 
-    if root_system > 0 or root_spool > 0:
-        if severity_band in {"Critical", "High"}:
-            return "cron_root_scheduled_execution_surface"
-        return "cron_root_scheduled_surface"
-
-    if user_crontab_ok or nonroot_spool > 0:
+    if user_crontab_ok:
         return "cron_user_persistence_surface"
 
     return "cron_scheduled_execution_surface"
@@ -251,26 +199,20 @@ def _primitive_for_cron_surface(
         user_crontab_ok=("cron_user_crontab_present" in risk_categories),
     )
 
-    if classification["root_system"] > 0 or classification["root_spool"] > 0:
+    # Determine Run As
+    # If we are hijacking a system file, it runs as root.
+    if classification["writable_system_files"]:
         run_as = "root"
     else:
-        run_as = user_name
+        # Default assumption, might be refined later
+        run_as = "root" if classification["root_system"] > 0 else user_name
 
-    any_root_system_world_writable = classification["any_root_system_world_writable"]
-    any_root_system_group_writable = classification["any_root_system_group_writable"]
-
-    if primitive_type == "cron_root_file_write_primitive":
-        exploitability = "moderate"
-    elif primitive_type in {"cron_root_scheduled_execution_surface", "cron_root_scheduled_surface"}:
-        exploitability = "advanced"
-    elif primitive_type == "cron_user_persistence_surface":
-        exploitability = "moderate"
+    # Determine Exploitability
+    if primitive_type == "cron_exec_primitive":
+        exploitability = "high" # Verified write access
+        stability = "safe"      # Appending to a file is generally safe
     else:
-        exploitability = "theoretical" if severity_band in {"Low"} else "advanced"
-
-    if primitive_type in {"cron_root_file_write_primitive"} and (any_root_system_world_writable or any_root_system_group_writable):
-        stability = "moderate"
-    else:
+        exploitability = "theoretical"
         stability = "safe"
 
     noise = "low"
@@ -279,17 +221,23 @@ def _primitive_for_cron_surface(
 
     confidence = PrimitiveConfidence(
         score=conf_score,
-        reason=f"Cron surfaces observed with {conf_band} confidence based on discovered files and crontab status.",
+        reason=f"Cron surfaces observed with {conf_band} confidence (verified permissions).",
     )
 
     offensive_value = OffensiveValue(
         classification=classification_band,
         why=(
-            f"Cron configuration implies {primitive_type} for run_as={run_as} "
-            f"with severity={severity_band} (score={severity_score}/10). "
-            "If scripts or targets referenced by these jobs are writable, this becomes a reliable privesc/persistence path."
+            f"Cron configuration grants {primitive_type} (run_as={run_as}). "
+            "Writable cron files enable persistence and often direct privilege escalation."
         ),
     )
+    
+    # === CONTEXT FOR EXPLOIT GENERATOR ===
+    # We pick the first writable file to be the target of our exploit suggestion
+    target_file = None
+    all_writables = classification["writable_system_files"] + classification["writable_spool_files"]
+    if all_writables:
+        target_file = all_writables[0]
 
     primitive = Primitive(
         id=new_primitive_id("cron", primitive_type),
@@ -297,26 +245,22 @@ def _primitive_for_cron_surface(
         type=primitive_type,
         run_as=run_as,
         origin_user=user_name,
-        exploitability=exploitability,  # type: ignore[arg-type]
-        stability=stability,            # type: ignore[arg-type]
-        noise=noise,                    # type: ignore[arg-type]
+        exploitability=exploitability,  # type: ignore
+        stability=stability,            # type: ignore
+        noise=noise,                    # type: ignore
         confidence=confidence,
         offensive_value=offensive_value,
         context={
             "classification": classification,
             "risk_categories": sorted(risk_categories),
-            "capabilities": sorted(capabilities),
             "severity_band": severity_band,
-            "severity_score": severity_score,
+            "target_file": target_file, # <--- Used by exploit_templates.py
         },
         conditions={
-            "requires_writable_target": primitive_type
-            in {"cron_root_scheduled_execution_surface", "cron_root_scheduled_surface"},
+            "requires_writable_target": True if target_file else False,
         },
         integration_flags={
             "chaining_allowed": True,
-            "supports_persistence_extension": True,
-            "supports_lateral_chain": False,
         },
         cross_refs={
             "gtfobins": [],
@@ -325,8 +269,10 @@ def _primitive_for_cron_surface(
         },
         defensive_impact={
             "risk_to_system": "total_compromise" if run_as == "root" else "high",
-            "visibility_risk": "low",
         },
+        # === Resource Linking ===
+        affected_resource=target_file, 
+        
         module_source="cron_enum",
         probe_source="cron_probe",
     )
@@ -353,105 +299,60 @@ def run(state: dict, report: Report):
             "Cron Analysis",
             [
                 "Cron metadata is present but no cron files or user crontab entries were identified.",
-                "Either this system does not use cron heavily, or cron configuration lives outside typical paths.",
             ],
         )
         return
 
     classification = _classify_cron_files(files_meta)
+    
+    # Extract counts for report
     root_system = classification["root_system"]
-    nonroot_system = classification["nonroot_system"]
-    root_spool = classification["root_spool"]
-    nonroot_spool = classification["nonroot_spool"]
-    any_world_writable_system = classification["any_world_writable_system"]
-    any_group_writable_system = classification["any_group_writable_system"]
-    any_world_writable_spool = classification["any_world_writable_spool"]
-    any_group_writable_spool = classification["any_group_writable_spool"]
+    writable_system = classification["writable_system_files"]
+    writable_spool = classification["writable_spool_files"]
+    any_writable = classification["any_writable"]
 
     capabilities: Set[str] = set()
-    if root_system or nonroot_system or root_spool or nonroot_spool or user_crontab_ok:
-        capabilities.add("scheduled_execution")
-    if (
-        any_world_writable_system
-        or any_group_writable_system
-        or any_world_writable_spool
-        or any_group_writable_spool
-    ):
+    if any_writable:
         capabilities.add("file_write")
-    if user_crontab_ok or nonroot_spool > 0:
+        capabilities.add("scheduled_execution")
+    if user_crontab_ok:
         capabilities.add("persistence")
 
     risk_categories: Set[str] = set()
-    if root_system > 0:
-        risk_categories.add("cron_root_system_files")
-    if nonroot_system > 0:
-        risk_categories.add("cron_nonroot_system_files")
-    if root_spool > 0:
-        risk_categories.add("cron_root_spool_files")
-    if nonroot_spool > 0:
-        risk_categories.add("cron_nonroot_spool_files")
-    if any_world_writable_system:
-        risk_categories.add("cron_system_file_world_writable")
-    if any_group_writable_system:
-        risk_categories.add("cron_system_file_group_writable")
-    if any_world_writable_spool:
-        risk_categories.add("cron_spool_file_world_writable")
-    if any_group_writable_spool:
-        risk_categories.add("cron_spool_file_group_writable")
+    if writable_system:
+        risk_categories.add("cron_root_writable")
     if user_crontab_ok:
         risk_categories.add("cron_user_crontab_present")
-    if classification["any_root_system_world_writable"]:
-        risk_categories.add("cron_root_system_world_writable")
-    if classification["any_root_system_group_writable"]:
-        risk_categories.add("cron_root_system_group_writable")
 
     (severity_score, severity_band), (conf_score, conf_band) = _cron_severity_and_confidence(
         classification=classification,
         user_crontab_ok=user_crontab_ok,
     )
 
-    descriptor_parts: List[str] = []
-    if root_system > 0:
-        descriptor_parts.append(f"{root_system} root-owned system cron file(s) under /etc/cron.* or /etc/crontab")
-    if nonroot_system > 0:
-        descriptor_parts.append(f"{nonroot_system} non-root-owned system cron file(s) under /etc/cron.* or /etc/crontab")
-    if root_spool > 0:
-        descriptor_parts.append(f"{root_spool} root-owned cron spool file(s) under /var/spool/cron*")
-    if nonroot_spool > 0:
-        descriptor_parts.append(f"{nonroot_spool} non-root cron spool file(s) under /var/spool/cron*")
-    if user_crontab_ok:
-        descriptor_parts.append(f"Per-user crontab present for {user.get('name', 'this account')}")
-
-    if not descriptor_parts:
-        descriptor_parts.append("Cron configuration present but no clear escalation-prone patterns identified")
-
-    descriptor = "; ".join(descriptor_parts)
-
-    # --- Report section (facts + scoring) ---
+    # --- Report section ---
     lines: List[str] = []
-    lines.append("This section analyses cron configuration and scheduled execution surfaces observed by Nullpeas.")
-    lines.append("It uses existing cron probe output (paths, ownership, permissions) and does not modify any jobs.")
-    lines.append("Severity reflects potential impact if abused; confidence reflects how likely the described surface is actually usable on this host.")
+    lines.append("This section analyses cron configuration and scheduled execution surfaces.")
     lines.append("")
 
     lines.append("### Cron summary")
-    lines.append(f"- System cron files discovered     : {len(classification['system_files'])}")
     lines.append(f"- Root-owned system cron files     : {root_system}")
-    lines.append(f"- Non-root system cron files       : {nonroot_system}")
-    lines.append(f"- Root-owned spool cron files      : {root_spool}")
-    lines.append(f"- Non-root spool cron files        : {nonroot_spool}")
-    lines.append(f"- Any world-writable system files  : {any_world_writable_system}")
-    lines.append(f"- Any group-writable system files  : {any_group_writable_system}")
-    lines.append(f"- Any world-writable spool files   : {any_world_writable_spool}")
-    lines.append(f"- Any group-writable spool files   : {any_group_writable_spool}")
+    lines.append(f"- Writable system cron files       : {len(writable_system)}")
+    lines.append(f"- Writable spool files             : {len(writable_spool)}")
     lines.append(f"- Per-user crontab for this user   : {user_crontab_ok}")
     lines.append("")
+    
+    if any_writable:
+        lines.append("#### 🚨 Verified Writable Cron Files")
+        for f in writable_system:
+             lines.append(f"- SYSTEM (Root): `{f}`")
+        for f in writable_spool:
+             lines.append(f"- SPOOL: `{f}`")
+        lines.append("")
+
     lines.append("### Assessed cron attack surface")
-    lines.append(f"- Descriptor                      : {descriptor}")
     lines.append(f"- Severity                        : {severity_band} ({severity_score}/10)")
     lines.append(f"- Confidence                      : {conf_band} ({conf_score}/10)")
-    if capabilities:
-        lines.append(f"- Capability tags                 : {', '.join(sorted(capabilities))}")
+    
     if risk_categories:
         lines.append(f"- Risk categories                 : {', '.join(sorted(risk_categories))}")
     lines.append("")
