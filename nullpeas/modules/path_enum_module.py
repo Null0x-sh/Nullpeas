@@ -1,5 +1,3 @@
-# nullpeas/modules/path_enum.py
-
 from typing import Dict, Any, List, Optional
 
 from nullpeas.core.report import Report
