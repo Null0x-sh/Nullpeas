@@ -19,10 +19,11 @@ def _parse_exec_start(content: str) -> str:
     """
     Simple regex to pull the binary path from ExecStart=...
     Ignores arguments, flags, etc.
+    
+    Updated to handle systemd prefixes: -, @, !, +
     """
-    # Look for ExecStart=/some/path -args or ExecStart=-/some/path
-    # We want the first token that looks like a path/binary
-    match = re.search(r'^ExecStart=[-@!]*\s*([^\s]+)', content, re.MULTILINE)
+    # Look for ExecStart followed by optional prefixes [-@!+], then the path.
+    match = re.search(r'^ExecStart=[-@!+]*\s*([^\s]+)', content, re.MULTILINE)
     if match:
         return match.group(1)
     return ""
@@ -55,7 +56,11 @@ def run(state: Dict[str, Any]) -> None:
                 scanned_units.add(filename)
 
                 # 1. Check if Unit File is Writable
-                can_write_unit = os.access(full_path, os.W_OK)
+                # We strictly check if WE can write to it.
+                try:
+                    can_write_unit = os.access(full_path, os.W_OK)
+                except OSError:
+                    can_write_unit = False
                 
                 # 2. Parse Content
                 try:
@@ -72,13 +77,17 @@ def run(state: Dict[str, Any]) -> None:
                 
                 if exec_binary:
                     # Check for relative path (no leading /)
-                    if not exec_binary.startswith("/"):
+                    # Some paths might be valid systemd vars (e.g. ${...}), we skip those to avoid FPs
+                    if not exec_binary.startswith("/") and not exec_binary.startswith("$"):
                         is_relative = True
                     
                     # Check if binary is writable (if absolute path)
-                    elif os.path.exists(exec_binary):
-                        if os.access(exec_binary, os.W_OK):
-                            can_write_binary = True
+                    elif exec_binary.startswith("/") and os.path.exists(exec_binary):
+                        try:
+                            if os.access(exec_binary, os.W_OK):
+                                can_write_binary = True
+                        except OSError:
+                            pass
 
                 unit_info = {
                     "name": filename,
