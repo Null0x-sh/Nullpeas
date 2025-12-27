@@ -283,7 +283,7 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
             chains.append(chain)
 
         # 3. Databases / Generic (Pivot)
-        elif p.type in {"network_db_surface", "network_remote_access_surface", "network_generic_surface"}:
+        elif p.type in {"network_db_surface", "network_remote_access_surface", "network_generic_surface", "network_active_session_surface"}:
             ip = p.context.get("ip")
             port = p.context.get("port")
             
@@ -502,3 +502,33 @@ def build_attack_chains(primitives: List[Primitive]) -> List[AttackChain]:
     )
 
     return chains
+
+
+# ----------------------------------------------------------------------
+# RENDERING SUPPORT
+# ----------------------------------------------------------------------
+
+def chains_to_dict(chains: List[AttackChain]) -> List[Dict]:
+    return [asdict(c) for c in chains]
+
+
+def summarize_chains(chains: List[AttackChain]) -> str:
+    if not chains:
+        return "No meaningful offensive chains were identified."
+
+    strongest = chains[0]
+
+    txt = f"""
+Nullpeas Offensive Chain Summary
+
+Top Chain:
+ - Goal: {strongest.goal}
+ - Exploitability: {strongest.exploitability}
+ - Stability: {strongest.stability}
+ - Noise: {strongest.noise}
+ - Truth: {strongest.offensive_truth}
+
+Total Chains Identified: {len(chains)}
+"""
+
+    return txt.strip()
