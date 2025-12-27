@@ -77,9 +77,11 @@ class Report:
         return lines
 
     def _render_mermaid(self) -> List[str]:
-        if not self.attack_chains: return []
+        if not self.attack_chains:
+            return []
+
         lines = ["## Visual Attack Map", "", "```mermaid", "graph TD"]
-        
+
         # Styles
         lines.append("    classDef primitive fill:#e1f5fe,stroke:#01579b,stroke-width:2px;")
         lines.append("    classDef rootGoal fill:#ffcdd2,stroke:#b71c1c,stroke-width:4px;")
@@ -88,41 +90,86 @@ class Report:
         lines.append("    classDef suid fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;")
         lines.append("    classDef trap fill:#ffe0b2,stroke:#e65100,stroke-width:2px;")
         lines.append("    classDef service fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px;")
-        lines.append("    classDef loot fill:#b2dfdb,stroke:#00695c,stroke-width:2px;") # <--- NEW: Loot Style
+        lines.append("    classDef loot fill:#b2dfdb,stroke:#00695c,stroke-width:2px;")
+        lines.append("    classDef startNode fill:#eeeeee,stroke:#424242,stroke-width:1px;")
 
-        # Only render Top 5 chains to keep diagram clean
-        for idx, chain in enumerate(self.attack_chains[:5], start=1):
+        # Re-use same sort logic as _render_attack_chains so diagrams and text match
+        def _sort_key(c: Dict[str, Any]):
+            class_score = {
+                "catastrophic": 0,
+                "critical": 1,
+                "severe": 2,
+                "high": 3,
+                "useful": 4,
+                "niche": 5,
+            }.get(c.get("classification", "niche"), 5)
+            return (c.get("priority", 999), class_score)
+
+        top_chains = sorted(self.attack_chains, key=_sort_key)[:5]
+
+        for idx, chain in enumerate(top_chains, start=1):
             goal = chain.get("goal", "Goal")
             lines.append(f"    subgraph C{idx} [Chain {idx}: {goal}]")
-            lines.append(f"    direction TB")
-            steps = chain.get("steps", [])
-            previous_node = f"Start_{idx}((Start))"
-            
+            lines.append("    direction TB")
+
+            # Start node
+            start_node = f"Start_{idx}((Start)):::startNode"
+            lines.append(f"    {start_node}")
+            previous_node = start_node
+
+            steps = chain.get("steps", []) or []
             for i, step in enumerate(steps):
                 desc = step.get("description", "Action") or "Step"
                 node_id = f"C{idx}_S{i}"
-                style_class = "primitive"
                 d_low = desc.lower()
-                
-                if "write" in d_low or "modify" in d_low: style_class = "fileWrite"
-                elif "persistence" in d_low: style_class = "persistence"
-                elif "suid" in d_low: style_class = "suid"
-                elif "hijack" in d_low or "trap" in d_low: style_class = "trap"
-                elif "systemd" in d_low or "service" in d_low: style_class = "service"
-                elif "harvest" in d_low or "credential" in d_low: style_class = "loot" # <--- Apply Style
-                
-                # Increased label length to 50 chars
-                label = desc.replace('"', "'")[:50]
+
+                # Default style
+                style_class = "primitive"
+
+                # Heuristics for step types
+                if "write" in d_low or "modify" in d_low:
+                    style_class = "fileWrite"
+                if "persistence" in d_low:
+                    style_class = "persistence"
+                if "suid" in d_low:
+                    style_class = "suid"
+                if "hijack" in d_low or "trap" in d_low:
+                    style_class = "trap"
+                if "systemd" in d_low or "service" in d_low:
+                    style_class = "service"
+                if "harvest" in d_low or "credential" in d_low:
+                    style_class = "loot"
+                if "wait for privileged user" in d_low:
+                    # Explicitly style the PATH “wait” step as a trap
+                    style_class = "trap"
+
+                # Truncate labels nicely with ellipsis if needed
+                safe_desc = desc.replace('"', "'")
+                if len(safe_desc) > 50:
+                    label = safe_desc[:47] + "..."
+                else:
+                    label = safe_desc
+
                 lines.append(f"    {node_id}[\"{label}\"]:::{style_class}")
                 lines.append(f"    {previous_node} --> {node_id}")
                 previous_node = node_id
-                
-            lines.append(f"    {previous_node} --> End_{idx}((({goal})))")
+
+            # Goal node styling
+            end_node = f"End_{idx}((({goal})))"
+            if goal == "root_shell":
+                end_node += ":::rootGoal"
+            elif goal in ("privilege_escalation", "persistence"):
+                end_node += ":::persistence"
+            elif goal in ("credential_access", "reconnaissance"):
+                end_node += ":::loot"
+
+            lines.append(f"    {previous_node} --> {end_node}")
             lines.append("    end")
-            
+
         lines.append("```")
         lines.append("")
         return lines
+
 
     def _render_attack_chains(self) -> List[str]:
         if not self.attack_chains: return []
