@@ -1,11 +1,11 @@
 """
 nullpeas/modules/loot_module.py
 Analyzes discovered files for sensitive information (credentials, history).
-v2.3 Improvements:
+v2.4 Improvements:
+- Added handler for 'account_db' (Fixes invisible /etc/passwd).
 - Reports 'unknown' loot so nothing silently vanishes.
-- Refined exploitability for password hashes (moderate vs trivial).
+- Refined exploitability for password hashes.
 - Added Python type hints.
-- Dead code (config_secret) kept as placeholder for future probe updates.
 """
 
 from typing import Dict, Any, List
@@ -52,7 +52,6 @@ def run(state: Dict[str, Any], report: Report):
         lines.append("### 🚨 Password Hashes (Shadow)")
         for p in by_cat["password_hashes"]:
             lines.append(f"- `{p}`")
-            # Distinct type 'password_store'
             primitives.append(_make_primitive(
                 p, "critical", "password_hashes", "password_store", 
                 "Readable shadow file found.", origin_user, origin_user
@@ -112,14 +111,24 @@ def run(state: Dict[str, Any], report: Report):
             ))
         lines.append("")
         
-    # Generic 'config_secret' (Placeholder for future probe updates)
     if "config_secret" in by_cat:
         lines.append("### ⚙️ Other Configuration Secrets")
         for p in by_cat["config_secret"]:
             lines.append(f"- `{p}`")
         lines.append("")
 
-    # 4. History
+    # 4. User Enumeration / History
+    if "account_db" in by_cat:  # <--- NEW HANDLER
+        lines.append("### 👥 Account Databases")
+        for p in by_cat["account_db"]:
+            lines.append(f"- `{p}`")
+            # Useful for enumeration, but usually low impact on its own
+            primitives.append(_make_primitive(
+                p, "useful", "account_db", "info_disclosure", 
+                "Account database (passwd) found.", origin_user, origin_user
+            ))
+        lines.append("")
+
     if "shell_history" in by_cat:
         lines.append("### 📜 Shell History")
         for p in by_cat["shell_history"]:
