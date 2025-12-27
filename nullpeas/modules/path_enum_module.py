@@ -1,3 +1,8 @@
+"""
+nullpeas/modules/path_enum_module.py
+Analyse PATH directories for hijack and execution surfaces.
+"""
+
 from typing import Dict, Any, List, Optional
 
 from nullpeas.core.report import Report
@@ -16,13 +21,11 @@ def _summarise_path(path_state: Dict[str, Any]) -> Dict[str, Any]:
     total_entries = len(entries)
     existing_entries = sum(1 for e in entries if e.get("exists"))
     
-    # Heuristics (Legacy/Info)
     user_writable = [e for e in entries if e.get("owner_writable")]
     group_writable = [e for e in entries if e.get("group_writable")]
     world_writable = [e for e in entries if e.get("world_writable")]
     
     # === NEW: Definitive Check ===
-    # This comes from the hardened probe's os.access(W_OK) check
     confirmed_writable = [e for e in entries if e.get("can_i_write")]
 
     return {
@@ -31,7 +34,7 @@ def _summarise_path(path_state: Dict[str, Any]) -> Dict[str, Any]:
         "user_writable_entries": user_writable,
         "group_writable_entries": group_writable,
         "world_writable_entries": world_writable,
-        "confirmed_writable_entries": confirmed_writable, # <--- The important one
+        "confirmed_writable_entries": confirmed_writable,
     }
 
 
@@ -43,7 +46,6 @@ def _score_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     in_home = bool(entry.get("in_home"))
     world_w = bool(entry.get("world_writable"))
     
-    # The probe says we can write to it. This is serious.
     can_write = bool(entry.get("can_i_write"))
 
     if can_write:
@@ -52,8 +54,7 @@ def _score_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         base_score = 5.0  # Medium if world writable but maybe we aren't the right user?
     
     if in_home:
-        # Home directory hijacking is useful but less severe than /usr/bin hijacking
-        # strictly speaking, but for local PE it's still a valid vector.
+        # Home hijacking is a valid vector but less critical than system hijacking
         pass
 
     if base_score > 10.0:
@@ -95,7 +96,6 @@ def _build_path_analysis_lines(path_state: Dict[str, Any]) -> List[str]:
     lines.append(f"- World-writable dirs (Raw)    : {len(summary['world_writable_entries'])}")
     lines.append("")
 
-    # Filter for candidates that are confirmed writable OR world/group writable (for visibility)
     writable_candidates: List[Dict[str, Any]] = [
         e for e in entries
         if e.get("exists") and (e.get("can_i_write") or e.get("world_writable") or e.get("group_writable"))
@@ -125,7 +125,6 @@ def _build_path_analysis_lines(path_state: Dict[str, Any]) -> List[str]:
         scoring = _score_entry(entry)
         owner_name = entry.get("owner_name") or str(entry.get("owner_uid", "unknown"))
         
-        # Icon logic
         icon = "🚨" if entry.get("can_i_write") else "⚠️"
 
         note_parts: List[str] = []
@@ -159,30 +158,21 @@ def _build_path_primitive(
     if not entries:
         return None
 
-    # We strictly care about what we can *actually* write to now.
-    # Fallback to world_writable if can_i_write is missing (compatibility), but prefer can_i_write.
+    # We strictly care about what we can *actually* write to.
     confirmed_candidates: List[Dict[str, Any]] = [
         e for e in entries
         if e.get("exists") and e.get("can_i_write")
     ]
     
-    # If probe didn't run with v2 logic, fall back to old heuristics
-    if not confirmed_candidates:
-         confirmed_candidates = [
-            e for e in entries
-            if e.get("exists") and (e.get("world_writable") or (e.get("group_writable") and "gid" in str(e.get("owner_gid")))) # rough heuristic
-         ]
-         
     if not confirmed_candidates:
         return None
 
-    # Scoring
-    severity_score = 8.0 # High baseline because we verified write access
+    severity_score = 8.0 
     severity_band = "High"
     
     any_system_path = any(not e.get("in_home") for e in confirmed_candidates)
     if any_system_path:
-        # Hijacking /usr/local/bin is Critical
+        # Hijacking /usr/local/bin or similar is Critical
         severity_score = 9.0
         severity_band = "Critical"
 
@@ -221,25 +211,10 @@ def _build_path_primitive(
     }
 
     conditions: Dict[str, Any] = {
-        "requires_victim_execution": True, # Needs someone else to run a command
-        "requires_relative_path": True,    # Victim must run 'cmd' not '/bin/cmd'
+        "requires_victim_execution": True,
+        "requires_relative_path": True,
     }
 
-    cross_refs: Dict[str, List[str]] = {
-        "gtfobins": [],
-        "cves": [],
-        "documentation": [],
-    }
-
-    defensive_impact: Dict[str, Any] = {
-        "misconfiguration_summary": (
-            "Writable PATH directories allow arbitrary code execution if a privileged user "
-            "or process executes a command from this directory."
-        )
-    }
-
-    # === NEW: Resource Linking ===
-    # We identify the first writable path as the primary resource for chaining.
     affected_resource = risky_dirs[0] if risky_dirs else None
 
     primitive = Primitive(
@@ -248,9 +223,9 @@ def _build_path_primitive(
         type="path_hijack_surface",
         run_as=origin_user,
         origin_user=origin_user,
-        exploitability="high",      # type: ignore[arg-type]
-        stability="safe",           # type: ignore[arg-type]
-        noise="moderate",           # type: ignore[arg-type]
+        exploitability="high",
+        stability="safe",
+        noise="moderate",
         confidence=confidence,
         offensive_value=offensive_value,
         context=context,
@@ -258,9 +233,7 @@ def _build_path_primitive(
         integration_flags={
             "path_hijack_candidate": True,
         },
-        cross_refs=cross_refs,
-        defensive_impact=defensive_impact,
-        affected_resource=affected_resource, # <--- Populated
+        affected_resource=affected_resource,
         module_source="path_enum",
         probe_source="path",
     )
