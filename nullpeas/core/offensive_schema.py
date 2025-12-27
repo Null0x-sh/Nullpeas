@@ -15,7 +15,6 @@ Exploitability = Literal["trivial", "moderate", "advanced", "theoretical"]
 Stability = Literal["safe", "moderate", "risky", "dangerous"]
 Noise = Literal["silent", "low", "noticeable", "loud"]
 
-# FIX 1: Added 'critical' and 'high' to match module usage
 Classification = Literal[
     "catastrophic", 
     "critical", 
@@ -25,12 +24,12 @@ Classification = Literal[
     "niche"
 ]
 
-# FIX 2: Added 'reconnaissance' for low-priority intel chains
+# FIX: Mature Taxonomy
 Goal = Literal[
-    "root_shell",
+    "root_compromise",      # Was root_shell
     "privilege_escalation",
     "persistence",
-    "lateral_movement",
+    "internal_pivot",       # Was lateral_movement
     "credential_access",
     "reconnaissance",
 ]
@@ -71,7 +70,7 @@ class Primitive:
     # Identity
     id: str
     surface: str                # e.g. "sudo", "cron", "docker", "suid"
-    type: str                   # e.g. "root_shell_primitive", "arbitrary_file_write"
+    type: str                   # e.g. "root_shell_primitive", "network_docker_surface"
 
     # Who / how it runs
     run_as: str                 # effective user if used (normally "root")
@@ -89,9 +88,7 @@ class Primitive:
     # Timeline
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
-    # === NEW: Logic Hardening ===
-    # Defines the specific resource this primitive controls (e.g., "/etc/passwd", "docker.sock").
-    # Used by the chaining engine to ensure we don't link unrelated primitives.
+    # Logic Hardening
     affected_resource: Optional[str] = None
 
     # Extra context for chaining/reporting
@@ -153,9 +150,7 @@ class AttackChain:
         default_factory=lambda: ChainConfidence(score=5.0, reason="not evaluated")
     )
 
-    # === NEW: Exploitation Support ===
-    # A list of copy-pasteable commands to execute this chain.
-    # Populated by the Chaining Engine using exploit_templates.py.
+    # Exploitation Support
     exploit_commands: List[str] = field(default_factory=list)
 
     time_profile: Dict[str, Any] = field(
