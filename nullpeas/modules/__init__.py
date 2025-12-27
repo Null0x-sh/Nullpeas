@@ -60,3 +60,4 @@ from . import systemd_module
 from . import suid_module
 from . import path_enum_module
 from . import caps_module
+from . import loot_module
