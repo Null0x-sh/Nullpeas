@@ -34,10 +34,6 @@ This engine thinks like an attacker, but stops one step before exploitation.
 
 If something is basically a guaranteed root escalation,
 we call it that. We do not sanitize truth.
-
-We do NOT execute anything.
-We do NOT generate payloads.
-We do NOT modify targets.
 """
 
 
@@ -93,6 +89,8 @@ def _offensive_truth_for(primitive: Primitive) -> str:
     run_as = primitive.run_as
 
     if t == "root_shell_primitive":
+        if primitive.surface == "capabilities":
+            return "Binary has 'cap_setuid+ep'. Allows spawning a shell and explicitly setting UID to 0 (Root)."
         return "This effectively grants direct root execution. In offensive reality, this is game-over."
 
     if t == "docker_host_takeover":
@@ -107,7 +105,14 @@ def _offensive_truth_for(primitive: Primitive) -> str:
     if t == "path_hijack_surface":
         return "Writable PATH directory allows interception of commands run by other users. High-value trap."
         
-    # === Systemd Truths (NEW) ===
+    # === Capabilities Truths (NEW) ===
+    if t == "group_pivot_primitive":
+        return "Binary has 'cap_setgid'. Allows pivoting to sensitive groups (disk, shadow) which often leads to root."
+    
+    if t == "arbitrary_file_access_primitive":
+        return "Binary has 'cap_dac_override'. Bypasses all file permissions to Read/Write ANY file on the system."
+
+    # === Systemd Truths ===
     if t == "systemd_unit_write":
         return "Writable service unit allows re-defining ExecStart. This grants root access upon service restart."
     if t == "systemd_binary_write":
@@ -133,11 +138,8 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
     for p in primitives:
         # Direct Root Win Chains
-        # Included: Known SUIDs (root_shell_primitive), Docker, and Unknown SUIDs (suid_primitive)
+        # Included: Known SUIDs/Caps (root_shell_primitive), Docker, and Unknown SUIDs (suid_primitive)
         if p.type in {"root_shell_primitive", "docker_host_takeover", "suid_primitive"}:
-            
-            # For unknown SUIDs, the confidence is naturally lower (from the primitive itself),
-            # but the goal is still root_shell.
             
             chain = AttackChain(
                 chain_id=new_chain_id("root"),
@@ -172,6 +174,25 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
             )
             chains.append(chain)
 
+        # === NEW: Group Pivot (Caps) ===
+        if p.type == "group_pivot_primitive":
+            chain = AttackChain(
+                chain_id=new_chain_id("privesc"),
+                goal="privilege_escalation",
+                priority=2,
+                exploitability=p.exploitability,
+                stability=p.stability,
+                noise=p.noise,
+                classification=p.offensive_value.classification,
+                summary=f"Group Pivot via {p.surface}",
+                offensive_truth=_offensive_truth_for(p),
+                steps=[{"primitive_id": p.id, "description": "Abuse cap_setgid to gain new group membership"}],
+                dependent_surfaces=[p.surface],
+                confidence=ChainConfidence(score=p.confidence.score, reason="Verified Capability"),
+                exploit_commands=generate_exploit_for_chain(p)
+            )
+            chains.append(chain)
+
     return chains
 
 
@@ -183,6 +204,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
     2. Writable Cron Job (Timed Escalation)
     3. PATH Hijacking (Trap Escalation)
     4. Systemd Service Abuse (New)
+    5. DAC Override -> File Write -> Service (New)
     """
     chains = []
     
@@ -193,37 +215,26 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
         if p.type == "arbitrary_file_write_primitive" and p.affected_resource
     }
     
+    # === NEW: Detect CAP_DAC_OVERRIDE (Universal Writer) ===
+    universal_writers = [p for p in primitives if p.type == "arbitrary_file_access_primitive"]
+
     # 1. Service Hijacking (Generic Write Config -> Restart Service)
     services = [p for p in primitives if p.surface in {"systemd", "services"}]
     
     for svc in services:
         config_path = svc.context.get("unit_file_path") or svc.context.get("config_path")
         
+        # A) Standard File Write Logic
         if config_path and config_path in writes:
             writer = writes[config_path]
-            
-            chain = AttackChain(
-                chain_id=new_chain_id("persistence"),
-                goal="persistence",
-                priority=2,
-                exploitability="moderate",
-                stability="moderate",
-                noise="noticeable",
-                classification="severe",
-                summary=f"Overwrite service config {config_path} via {writer.surface}",
-                offensive_truth="This chain reliably converts file write into root persistence.",
-                steps=[
-                    {"primitive_id": writer.id, "description": f"Modify {config_path} via {writer.surface}"},
-                    {"primitive_id": svc.id, "description": "Trigger service reload/restart"},
-                ],
-                dependent_surfaces=[writer.surface, svc.surface],
-                confidence=ChainConfidence(
-                    score=min(writer.confidence.score, svc.confidence.score),
-                    reason="Validated resource intersection (write->read)"
-                ),
-                exploit_commands=[]
-            )
-            chains.append(chain)
+            chains.append(_create_service_write_chain(writer, svc, config_path))
+
+        # B) CAP_DAC_OVERRIDE Logic (Universal Writer)
+        # If we have DAC Override, we can theoretically overwrite ANY service config.
+        # To avoid spam, we only map it if we have at least one valid trigger (service)
+        if config_path and universal_writers:
+            for writer in universal_writers:
+                chains.append(_create_service_write_chain(writer, svc, config_path, method="capabilities"))
 
     # 2. Cron + Writable Script (Classic)
     cron_primitives = [p for p in primitives if p.type in {"cron_exec_primitive", "cron_user_persistence_surface"}]
@@ -280,7 +291,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
         )
         chains.append(chain)
 
-    # 4. Systemd Service Abuse (NEW)
+    # 4. Systemd Service Abuse
     # These primitives are high-confidence direct escalations if the service restarts.
     systemd_primitives = [
         p for p in primitives 
@@ -288,7 +299,6 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
     ]
 
     for p in systemd_primitives:
-        # We try to use the exploit hint generated by the module, or fallback to generator
         cmds = []
         if p.context.get("exploit_hint"):
             cmds.append(p.context.get("exploit_hint"))
@@ -297,7 +307,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
         chain = AttackChain(
             chain_id=new_chain_id("service"),
-            goal="privilege_escalation", # Services usually run as root
+            goal="privilege_escalation", 
             priority=2,
             exploitability=p.exploitability,
             stability=p.stability,
@@ -319,6 +329,38 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
         chains.append(chain)
 
     return chains
+
+
+def _create_service_write_chain(writer: Primitive, svc: Primitive, target: str, method="fs") -> AttackChain:
+    """Helper to build file write -> service restart chain"""
+    truth = "This chain reliably converts file write into root persistence."
+    desc = f"Modify {target} via {writer.surface}"
+    
+    if method == "capabilities":
+        truth = "Using CAP_DAC_OVERRIDE bypasses file permissions to overwrite the service unit."
+        desc = f"Overwrite {target} using binary with cap_dac_override"
+
+    return AttackChain(
+        chain_id=new_chain_id("persistence"),
+        goal="persistence",
+        priority=2,
+        exploitability="moderate",
+        stability="moderate",
+        noise="noticeable",
+        classification="severe",
+        summary=f"Overwrite service config via {writer.surface}",
+        offensive_truth=truth,
+        steps=[
+            {"primitive_id": writer.id, "description": desc},
+            {"primitive_id": svc.id, "description": "Trigger service reload/restart"},
+        ],
+        dependent_surfaces=[writer.surface, svc.surface],
+        confidence=ChainConfidence(
+            score=min(writer.confidence.score, svc.confidence.score),
+            reason="Validated resource intersection"
+        ),
+        exploit_commands=[] # Typically requires manual payload crafting
+    )
 
 
 # ----------------------------------------------------------------------
@@ -353,20 +395,14 @@ def build_attack_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
 
 # ----------------------------------------------------------------------
-# RENDERING SUPPORT (OPTIONAL FOR REPORT ENGINE)
+# RENDERING SUPPORT
 # ----------------------------------------------------------------------
 
 def chains_to_dict(chains: List[AttackChain]) -> List[Dict]:
-    """
-    Convert chains to serializable form
-    """
     return [asdict(c) for c in chains]
 
 
 def summarize_chains(chains: List[AttackChain]) -> str:
-    """
-    Provide a short operator summary text.
-    """
     if not chains:
         return "No meaningful offensive chains were identified."
 
