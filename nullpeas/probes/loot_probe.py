@@ -2,11 +2,10 @@
 nullpeas/probes/loot_probe.py
 Enumerates sensitive files (Loot) in targeted high-probability directories.
 Optimized for speed: Does not scan the entire filesystem.
-v2.1 Improvements:
-- Tightened filename list to reduce noise.
-- Result capping (200 items) for safety.
-- Richer semantic classification.
-- Sorted/Deduped output.
+v2.3 Improvements:
+- Tighter SSH key detection (avoids generic "key" substring matches).
+- Special handling for master.key (Rails) and passwd.
+- Categorizes 'passwd' explicitly as account_db.
 """
 
 import subprocess
@@ -15,18 +14,17 @@ import os
 from typing import Dict, Any
 
 # Targeted directories for loot hunting
-# We skip / to avoid hanging on massive mounts.
 TARGET_DIRS = [
     "/home",
-    "/root",        # We might have read access even if not root (misconfigured permissions)
-    "/etc",         # Configs
-    "/opt",         # Custom apps often drop secrets here
-    "/var/www",     # Web roots (.env, config.php)
-    "/var/backups", # Backup files
-    "/tmp",         # Lazy admin drops
+    "/root",        
+    "/etc",         
+    "/opt",         
+    "/var/www",     
+    "/var/backups", 
+    "/tmp",         
 ]
 
-# Exact filename matches we care about - Tightened for v2.1
+# Exact filename matches we care about
 INTERESTING_FILES = {
     # SSH / Keys
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
@@ -49,7 +47,7 @@ INTERESTING_FILES = {
     "docker-compose.yml",
 }
 
-MAX_RESULTS = 200  # Safety cap to prevent massive state blobs
+MAX_RESULTS = 200  # Safety cap
 
 def run(state: Dict[str, Any]) -> None:
     loot_data = {
@@ -90,7 +88,7 @@ def run(state: Dict[str, Any]) -> None:
 
     raw_output = ""
     try:
-        # 15s timeout should be plenty for targeted depth scan
+        # 15s timeout
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
@@ -109,7 +107,6 @@ def run(state: Dict[str, Any]) -> None:
 
     # 3. Process Results
     if raw_output:
-        # Sort and dedupe for nicer reporting and consistency
         paths = sorted(set(raw_output.strip().split('\n')))
         
         for p in paths:
@@ -117,28 +114,31 @@ def run(state: Dict[str, Any]) -> None:
             if not path:
                 continue
             
-            # Safety Cap Check
             if len(loot_data["found"]) >= MAX_RESULTS:
-                loot_data["error"] = (
-                    f"Result cap reached ({MAX_RESULTS}). Listing truncated for stealth/performance."
-                )
+                loot_data["error"] = f"Result cap reached ({MAX_RESULTS}). Listing truncated."
                 break
 
-            # Filter out some noise (e.g. inside "node_modules")
             if "node_modules" in path:
                 continue
                 
-            # Richer Classification
+            # Classification
             name = os.path.basename(path)
             category = "unknown"
 
-            if "ssh" in path or name.startswith("id_") or "key" in name:
+            # 1. SSH & Keys (Tightened)
+            if name == "master.key":
+                category = "web_config" # Rails master key -> Web/App Config
+            elif "ssh" in path or name.startswith("id_") or name.endswith(".key"):
                 category = "ssh_key"
+            
+            # 2. History
             elif "history" in name:
                 category = "shell_history"
+            
+            # 3. Credentials & Configs
             elif ".git-credentials" in name:
                 category = "scm_creds"
-            elif ".env" in name or "config.php" in name or "wp-config.php" in name:
+            elif ".env" in name or name.endswith(".php"):
                 category = "web_config"
             elif "docker-compose" in name:
                 category = "container_config"
@@ -146,6 +146,12 @@ def run(state: Dict[str, Any]) -> None:
                 category = "cloud_creds"
             elif "shadow" in name:
                 category = "password_hashes"
+            elif name == "passwd":
+                category = "account_db"
+                
+            # 4. Generic Configs
+            elif name in ["config.json", "settings.json"]:
+                category = "config_secret"
                 
             loot_data["found"].append({
                 "path": path,
