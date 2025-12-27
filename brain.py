@@ -3,12 +3,8 @@
 """
 Nullpeas main entrypoint.
 
-Refactored for v2.0:
-- Added TTY detection to support reverse shells (auto-run mode).
-- Added Exploit Cheat Sheet reporting logic (file + stdout).
-- Added SUID/SGID probe integration.
-- Added Systemd probe integration.
-- FIXED: Mermaid Diagram population bug.
+Refactored for v2.3:
+- Added Linux Capabilities (caps) probe integration.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,6 +24,7 @@ from nullpeas.probes.runtime_probe import run as run_runtime_probe
 from nullpeas.probes.path_probe import run as run_path_probe
 from nullpeas.probes.suid_probe import run as run_suid_probe
 from nullpeas.probes.systemd_probe import run as run_systemd_probe
+from nullpeas.probes.caps_probe import run as run_caps_probe  # <--- NEW IMPORT
 
 from nullpeas.modules import get_available_modules
 
@@ -58,6 +55,7 @@ def _run_all_probes_threaded() -> dict:
         ("path", run_path_probe),
         ("suid", run_suid_probe),
         ("systemd", run_systemd_probe),
+        ("caps", run_caps_probe),  # <--- NEW PROBE
     ]
 
     with ThreadPoolExecutor(max_workers=len(probes)) as executor:
@@ -95,6 +93,7 @@ def _build_triggers(state: dict):
     path = state.get("path", {}) or {}
     suid = state.get("suid", {}) or {}
     systemd = state.get("systemd", {}) or {}
+    # caps doesn't strictly need a trigger logic yet as it self-reports via primitive
 
     container = runtime.get("container", {}) or {}
     virt = runtime.get("virtualization", {}) or {}
@@ -207,6 +206,7 @@ def _print_summary(state: dict):
     runtime = state.get("runtime", {})
     suid = state.get("suid", {})
     systemd = state.get("systemd", {})
+    caps = state.get("caps", {}) # <--- Print Caps Summary
 
     print("=== User ===")
     print(f"  Name : {user.get('name')}")
@@ -254,6 +254,13 @@ def _print_summary(state: dict):
         method = suid.get("method", "unknown")
         print(f"  Files found      : {found_count}")
         print(f"  Method           : {method}")
+    print()
+    
+    print("=== Capabilities ===") # <--- New Section
+    if caps.get("error"):
+        print(f"  Error            : {caps['error']}")
+    else:
+        print(f"  Files found      : {len(caps.get('found', []))}")
     print()
     
     print("=== Systemd ===")
@@ -352,7 +359,7 @@ def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
         return
 
     # Stable ordering: known surfaces first, then any others.
-    preferred_order = ["sudo", "docker", "cron", "systemd", "path", "suid"]
+    preferred_order = ["sudo", "docker", "cron", "systemd", "path", "suid", "caps"]
     ordered_keys: List[str] = []
 
     for k in preferred_order:
@@ -592,18 +599,4 @@ def main():
     report = Report(title="Nullpeas Privilege Escalation Analysis")
 
     # Run interactive modules
-    _interactive_modules(state, report)
-
-    # 1) Analysis sections
-    _append_analysis_sections_to_report(state, report)
-
-    # 2) Offensive chaining engine section
-    _append_offensive_chains_to_report(state, report)
-
-    if report.sections:
-        path = report.write()
-        print(f"[+] Report written to: {path}")
-
-
-if __name__ == "__main__":
-    main()
+    _interactiv
