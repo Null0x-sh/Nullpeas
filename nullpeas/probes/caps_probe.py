@@ -1,7 +1,6 @@
 """
 nullpeas/probes/caps_probe.py
 Enumerates binaries with Linux Capabilities (getcap).
-Fix: Recovers partial results if the scan times out.
 """
 
 import subprocess
@@ -18,6 +17,9 @@ PRUNE_PATHS = [
     "/snap", 
     "/var/lib/docker", 
     "/var/lib/kubelet",
+    
+    # /mnt and /media pruned to avoid hanging on slow / remote FS
+    # This intentionally ignores removable or network-mounted binaries
     "/mnt",
     "/media"
 ]
@@ -58,7 +60,6 @@ def run(state: Dict[str, Any]) -> None:
         raw_output = result.stdout
 
     except subprocess.TimeoutExpired as e:
-        # === FIX: Recover partial output from the exception ===
         caps_data["error"] = "Scan timed out (results may be partial)."
         if e.stdout:
             raw_output = e.stdout
@@ -66,7 +67,6 @@ def run(state: Dict[str, Any]) -> None:
     except Exception as e:
         caps_data["error"] = str(e)
 
-    # Parse whatever output we got (Full or Partial)
     if raw_output:
         lines = raw_output.strip().split('\n')
         
