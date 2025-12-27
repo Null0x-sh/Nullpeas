@@ -16,8 +16,7 @@ from nullpeas.core.offensive_schema import (
     new_primitive_id,
 )
 
-# Reuse knowledge base if possible, or define a small subset relevant to SUID
-# Common SUID GTFOBins
+# Common SUID GTFOBins (High Priority)
 KNOWN_SUID_BINS = {
     "bash", "sh", "ksh", "csh", "tcsh", "zsh",
     "env", "python", "python3", "perl", "ruby", "lua", "php",
@@ -26,15 +25,22 @@ KNOWN_SUID_BINS = {
     "systemctl", "docker", "snap", "git", "sed", "pip"
 }
 
+# Standard System Binaries (Ignore List)
+# These are normally SUID but rarely exploitable in default configs.
+# Filtering them removes noise.
+IGNORE_LIST = {
+    "sudo", "su", "passwd", "mount", "umount", "chfn", "chsh", "gpasswd",
+    "newgrp", "pkexec", "polkit-agent-helper-1", "ssh-keysign", 
+    "dbus-daemon-launch-helper", "fusermount", "fusermount3", "at", 
+    "snap-confine", "chrome-sandbox"
+}
+
 
 def _get_binary_name(path: str) -> str:
     return os.path.basename(path)
 
 
 def _analyze_suid_file(path: str) -> Dict[str, Any]:
-    """
-    Stat the file to confirm it's actually SUID/SGID and get ownership.
-    """
     info = {
         "path": path,
         "is_suid": False,
@@ -51,14 +57,11 @@ def _analyze_suid_file(path: str) -> Dict[str, Any]:
     try:
         st = os.stat(path)
         mode = st.st_mode
-        
         info["is_suid"] = bool(mode & stat.S_ISUID)
         info["is_sgid"] = bool(mode & stat.S_ISGID)
         info["owner"] = st.st_uid
         info["group"] = st.st_gid
-        
     except OSError:
-        # File might have disappeared or we can't stat it
         pass
         
     return info
@@ -68,16 +71,18 @@ def _build_suid_primitive(entry: Dict[str, Any], user_name: str) -> Optional[Pri
     if not entry["is_suid"]:
         return None
         
-    # We generally only care if root owns it. 
-    # SUID owned by 'nobody' is rarely useful.
     if entry["owner"] != 0:
         return None
 
     binary = entry["binary"]
+    
+    # FILTER: Skip standard system binaries to reduce noise
+    if binary in IGNORE_LIST and not entry["known_gtfobin"]:
+        return None
+
     path = entry["path"]
     is_known = entry["known_gtfobin"]
 
-    # Classification
     if is_known:
         primitive_type = "root_shell_primitive"
         confidence_score = 9.5
@@ -104,7 +109,7 @@ def _build_suid_primitive(entry: Dict[str, Any], user_name: str) -> Optional[Pri
         why=why
     )
 
-    primitive = Primitive(
+    return Primitive(
         id=new_primitive_id("suid", primitive_type),
         surface="suid",
         type=primitive_type,
@@ -123,21 +128,18 @@ def _build_suid_primitive(entry: Dict[str, Any], user_name: str) -> Optional[Pri
         integration_flags={
             "root_goal_candidate": is_known,
         },
-        affected_resource=path, # For chaining
+        affected_resource=path,
         module_source="suid_module",
         probe_source="suid_probe",
     )
-
-    return primitive
 
 
 @register_module(
     key="suid_module",
     description="Scan for SUID/SGID binaries that allow privilege escalation",
-    required_triggers=["suid_files_present"], # <--- FIXED: Runs if SUID files are found
+    required_triggers=["suid_files_present"],
 )
 def run(state: Dict[str, Any], report: Report):
-    # Safety check: if we are already root, we might skip logic
     if state.get("triggers", {}).get("is_root"):
         return
 
@@ -152,7 +154,6 @@ def run(state: Dict[str, Any], report: Report):
 
     findings = []
     
-    # Analyze found files
     for raw in raw_found:
         info = _analyze_suid_file(raw["path"])
         if info["is_suid"] or info["is_sgid"]:
@@ -171,7 +172,9 @@ def run(state: Dict[str, Any], report: Report):
     for f in findings:
         if f["is_suid"]:
             icon = "🚨" if f["known_gtfobin"] else "ℹ️"
-            lines.append(f"- {icon} `{f['path']}` (Known: {f['known_gtfobin']})")
+            # Mark ignored binaries in the list for transparency
+            note = "(Ignored Standard)" if f["binary"] in IGNORE_LIST else ""
+            lines.append(f"- {icon} `{f['path']}` {note}")
     
     lines.append("")
     lines.append("### SGID Binaries")
@@ -185,7 +188,6 @@ def run(state: Dict[str, Any], report: Report):
     primitives = state.setdefault("offensive_primitives", [])
     
     for f in findings:
-        # Only create primitives for Root SUIDs (high value)
         if f["is_suid"] and f["owner"] == 0:
             p = _build_suid_primitive(f, user_name)
             if p:
