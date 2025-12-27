@@ -14,7 +14,7 @@ It:
 """
 
 from __future__ import annotations
-from typing import List, Dict, Optional
+from typing import List, Dict
 from dataclasses import asdict
 from nullpeas.core.offensive_schema import (
     Primitive,
@@ -47,14 +47,18 @@ GOAL_PRIORITY = {
     "persistence": 3,
     "credential_access": 4,
     "lateral_movement": 5,
+    "reconnaissance": 6, 
 }
 
+LOOT_TYPES = {"credential_file", "password_store", "config_file", "info_disclosure"}
 
 CLASS_WEIGHT = {
-    "catastrophic": 10,
-    "severe": 7,
-    "useful": 4,
-    "niche": 1,
+    "catastrophic": 10, # Guaranteed Root / Game Over
+    "critical": 9,      # Immediate high risk (SSH Keys, Shadow file)
+    "severe": 7,        # High risk but might need extra steps
+    "high": 6,          # Added for safety
+    "useful": 4,        # Good for pivoting/recon
+    "niche": 1,         # Edge cases
 }
 
 EXPLOIT_WEIGHT = {
@@ -69,14 +73,8 @@ EXPLOIT_WEIGHT = {
 # INTERNAL HELPERS
 # ----------------------------------------------------------------------
 
-def _primitive_lookup(primitives: List[Primitive]) -> Dict[str, Primitive]:
-    lookup = {}
-    for p in primitives:
-        lookup[p.id] = p
-    return lookup
-
-
 def _score_chain(classification: str, exploitability: str) -> int:
+    # Now 'critical' will correctly return 9 instead of default 1
     return CLASS_WEIGHT.get(classification, 1) + EXPLOIT_WEIGHT.get(exploitability, 1)
 
 
@@ -105,7 +103,7 @@ def _offensive_truth_for(primitive: Primitive) -> str:
     if t == "path_hijack_surface":
         return "Writable PATH directory allows interception of commands run by other users. High-value trap."
         
-    # === Capabilities Truths (NEW) ===
+    # === Capabilities Truths ===
     if t == "group_pivot_primitive":
         return "Binary has 'cap_setgid'. Allows pivoting to sensitive groups (disk, shadow) which often leads to root."
     
@@ -123,6 +121,16 @@ def _offensive_truth_for(primitive: Primitive) -> str:
     if t == "arbitrary_file_write_primitive":
         return "Arbitrary privileged file write enables service hijack, persistence, and potential direct escalation."
 
+    # === Loot Truths ===
+    if t == "credential_file":
+        return "Discovered credentials often allow immediate lateral movement or access to critical infrastructure."
+    if t == "password_store":
+        return "Access to password hashes allows offline cracking and potential impersonation of users."
+    if t == "config_file":
+        return "Configuration files frequently contain hardcoded database passwords, API keys, or internal network details."
+    if t == "info_disclosure":
+        return "Historical commands and environment configs provide critical context for pivoting and identifying high-value targets."
+
     if run_as.lower() == "root":
         return "This surface results in privileged execution and is realistically abusable."
 
@@ -138,7 +146,6 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
     for p in primitives:
         # Direct Root Win Chains
-        # Included: Known SUIDs/Caps (root_shell_primitive), Docker, and Unknown SUIDs (suid_primitive)
         if p.type in {"root_shell_primitive", "docker_host_takeover", "suid_primitive"}:
             
             chain = AttackChain(
@@ -174,7 +181,7 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
             )
             chains.append(chain)
 
-        # === NEW: Group Pivot (Caps) ===
+        # === Group Pivot (Caps) ===
         if p.type == "group_pivot_primitive":
             chain = AttackChain(
                 chain_id=new_chain_id("privesc"),
@@ -190,6 +197,43 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
                 dependent_surfaces=[p.surface],
                 confidence=ChainConfidence(score=p.confidence.score, reason="Verified Capability"),
                 exploit_commands=generate_exploit_for_chain(p)
+            )
+            chains.append(chain)
+
+        # === Loot & Intelligence ===
+        if p.type in LOOT_TYPES:
+            
+            target_file = p.context.get("path", "file")
+            cmds = [f"cat {target_file}"]
+            
+            # Default goal/priority
+            goal = "credential_access"
+            priority = 4
+            summary_text = f"Intelligence collection via {p.surface}"
+            
+            # 1. Info Disclosure Adjustment
+            if p.type == "info_disclosure":
+                goal = "reconnaissance"
+                priority = 5  
+            
+            # 2. Summary Adjustment
+            if p.type in {"credential_file", "password_store"}:
+                summary_text = f"Credential harvest via {p.surface}"
+            
+            chain = AttackChain(
+                chain_id=new_chain_id("loot"),
+                goal=goal,
+                priority=priority,
+                exploitability=p.exploitability,
+                stability=p.stability, # Dynamic: Inherit from primitive
+                noise=p.noise,         # Dynamic: Inherit from primitive
+                classification=p.offensive_value.classification,
+                summary=summary_text,
+                offensive_truth=_offensive_truth_for(p),
+                steps=[{"primitive_id": p.id, "description": f"Harvest {target_file}"}],
+                dependent_surfaces=[p.surface],
+                confidence=ChainConfidence(score=p.confidence.score, reason="Verified file existence"),
+                exploit_commands=cmds
             )
             chains.append(chain)
 
@@ -215,7 +259,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
         if p.type == "arbitrary_file_write_primitive" and p.affected_resource
     }
     
-    # === NEW: Detect CAP_DAC_OVERRIDE (Universal Writer) ===
+    # Detect CAP_DAC_OVERRIDE (Universal Writer)
     universal_writers = [p for p in primitives if p.type == "arbitrary_file_access_primitive"]
 
     # 1. Service Hijacking (Generic Write Config -> Restart Service)
@@ -230,8 +274,6 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
             chains.append(_create_service_write_chain(writer, svc, config_path))
 
         # B) CAP_DAC_OVERRIDE Logic (Universal Writer)
-        # If we have DAC Override, we can theoretically overwrite ANY service config.
-        # To avoid spam, we only map it if we have at least one valid trigger (service)
         if config_path and universal_writers:
             for writer in universal_writers:
                 chains.append(_create_service_write_chain(writer, svc, config_path, method="capabilities"))
@@ -273,8 +315,8 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
             goal="privilege_escalation",
             priority=3,
             exploitability=p.exploitability,
-            stability="safe",
-            noise="moderate",
+            stability=p.stability, # Dynamic
+            noise=p.noise,         # Dynamic
             classification="severe",
             summary=f"PATH Interception via {p.affected_resource}",
             offensive_truth=_offensive_truth_for(p),
@@ -292,7 +334,6 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
         chains.append(chain)
 
     # 4. Systemd Service Abuse
-    # These primitives are high-confidence direct escalations if the service restarts.
     systemd_primitives = [
         p for p in primitives 
         if p.type in {"systemd_unit_write", "systemd_binary_write", "systemd_relative_path"}
@@ -359,7 +400,7 @@ def _create_service_write_chain(writer: Primitive, svc: Primitive, target: str, 
             score=min(writer.confidence.score, svc.confidence.score),
             reason="Validated resource intersection"
         ),
-        exploit_commands=[] # Typically requires manual payload crafting
+        exploit_commands=[] 
     )
 
 
