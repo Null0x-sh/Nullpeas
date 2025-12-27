@@ -9,9 +9,10 @@ class Report:
     """
     Nullpeas unified reporting engine.
     
-    v2.3 Update: "Loot Integration"
-    - Added 'loot' classDef for Mermaid visualization.
-    - Ensures credential/recon chains are visually distinct.
+    v2.7 Update: "Taxonomy & Visualization Polish"
+    - Added 'pivot' classDef for Internal Pivot chains.
+    - Updated goal mapping for 'root_compromise'.
+    - Improved step styling heuristics for network actions.
     """
 
     def __init__(
@@ -91,6 +92,7 @@ class Report:
         lines.append("    classDef trap fill:#ffe0b2,stroke:#e65100,stroke-width:2px;")
         lines.append("    classDef service fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px;")
         lines.append("    classDef loot fill:#b2dfdb,stroke:#00695c,stroke-width:2px;")
+        lines.append("    classDef pivot fill:#d1c4e9,stroke:#512da8,stroke-width:2px;") # <--- NEW: Purple for Pivot
         lines.append("    classDef startNode fill:#eeeeee,stroke:#424242,stroke-width:1px;")
 
         # Re-use same sort logic as _render_attack_chains so diagrams and text match
@@ -135,12 +137,13 @@ class Report:
                     style_class = "suid"
                 if "hijack" in d_low or "trap" in d_low:
                     style_class = "trap"
-                if "systemd" in d_low or "service" in d_low:
+                if "systemd" in d_low or "service" in d_low or "connect" in d_low or "mount" in d_low:
                     style_class = "service"
                 if "harvest" in d_low or "credential" in d_low:
                     style_class = "loot"
+                if "enumerate" in d_low or "pivot" in d_low:
+                    style_class = "pivot"
                 if "wait for privileged user" in d_low:
-                    # Explicitly style the PATH “wait” step as a trap
                     style_class = "trap"
 
                 # Truncate labels nicely with ellipsis if needed
@@ -154,14 +157,17 @@ class Report:
                 lines.append(f"    {previous_node} --> {node_id}")
                 previous_node = node_id
 
-            # Goal node styling
+            # Goal node styling based on new taxonomy
             end_node = f"End_{idx}((({goal})))"
-            if goal == "root_shell":
+            
+            if goal == "root_compromise": 
                 end_node += ":::rootGoal"
             elif goal in ("privilege_escalation", "persistence"):
                 end_node += ":::persistence"
             elif goal in ("credential_access", "reconnaissance"):
                 end_node += ":::loot"
+            elif goal == "internal_pivot":
+                end_node += ":::pivot"
 
             lines.append(f"    {previous_node} --> {end_node}")
             lines.append("    end")
