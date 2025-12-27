@@ -1,13 +1,13 @@
 """
 nullpeas/modules/net_module.py
 Analyzes network state for pivot points, internal services, and lateral movement targets.
-v2.2:
-- Semantic Primitives (network_docker_surface, etc.)
-- Realistic Confidence Scoring (Curve: 9.5 -> 5.0)
-- Improved Port Descriptions
+v2.3:
+- Semantic Types: 'network_active_session_surface' vs 'network_remote_access_surface'.
+- Explicit Confidence: Reason strings now include risk classification.
+- Logic: Treats 0.0.0.0 (wildcard) as locally exploitable.
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any
 from nullpeas.core.report import Report
 from nullpeas.modules import register_module
 from nullpeas.core.offensive_schema import (
@@ -108,6 +108,7 @@ def run(state: Dict[str, Any], report: Report):
         lines.append("")
 
     # 2. Active Connections
+    # Looking for INCOMING connections to port 22 (SSH)
     ssh_sessions = [c for c in connections if c["local_port"] == 22]
     
     if ssh_sessions:
@@ -119,13 +120,16 @@ def run(state: Dict[str, Any], report: Report):
             primitives.append(Primitive(
                 id=new_primitive_id("net", "active_session"),
                 surface="network",
-                type="network_remote_access_surface", # Semantic Type
+                type="network_active_session_surface", # v2.3: Explicit Type
                 run_as=origin_user,
                 origin_user=origin_user,
                 exploitability="theoretical",
                 stability="risky",
                 noise="low",
-                confidence=PrimitiveConfidence(score=6.0, reason="Active SSH connection observed"),
+                confidence=PrimitiveConfidence(
+                    score=6.0, 
+                    reason="Active SSH connection confirmed (risk=useful)"
+                ),
                 offensive_value=OffensiveValue(
                     classification="useful",
                     why="Active admin session implies potential for SSH Agent Hijacking (SSH_AUTH_SOCK)."
@@ -162,6 +166,7 @@ def _add_service_primitive(primitives, ip, port, desc, user, scope):
     exploitability = "moderate"
     confidence_score = 5.0 # Baseline
     
+    # Important: Treat 0.0.0.0 (wildcard) as locally accessible too
     is_local_access = scope in ("local", "wildcard")
 
     # 1. Critical Surfaces (Docker / Redis)
@@ -170,22 +175,22 @@ def _add_service_primitive(primitives, ip, port, desc, user, scope):
         classification = "catastrophic"
         exploitability = "trivial"
         desc = "Docker Socket exposed on TCP (Root Compromise)"
-        confidence_score = 9.5 # Almost certain win
+        confidence_score = 9.5
         
     elif port == 6379 and is_local_access:
         primitive_type = "network_redis_surface"
         classification = "critical"
         exploitability = "trivial"
         desc = "Local Redis (Potential RCE via Cron/SSH)"
-        confidence_score = 8.0 # High, but requires specific config write permissions
+        confidence_score = 8.0
 
     # 2. Database Surfaces (SQL / Mongo)
     elif port in [5432, 3306, 27017]:
         primitive_type = "network_db_surface"
         classification = "severe" 
-        confidence_score = 6.5 # High value, but needs auth bypass or weak creds
+        confidence_score = 6.5
     
-    # 3. Remote Access Surfaces (SSH/RDP - usually for pivoting)
+    # 3. Remote Access Surfaces (SSH/RDP)
     elif port in [22, 3389, 5900]:
         primitive_type = "network_remote_access_surface"
         classification = "useful"
@@ -194,13 +199,16 @@ def _add_service_primitive(primitives, ip, port, desc, user, scope):
     primitives.append(Primitive(
         id=new_primitive_id("net", "local_service"),
         surface="network",
-        type=primitive_type, # Semantic Type applied here
+        type=primitive_type,
         run_as="unknown",
         origin_user=user,
         exploitability=exploitability, # type: ignore
         stability="safe",
         noise="low",
-        confidence=PrimitiveConfidence(score=confidence_score, reason=f"Port {port} confirmed listening ({scope})"),
+        confidence=PrimitiveConfidence(
+            score=confidence_score, 
+            reason=f"Port {port} confirmed listening ({scope}); risk={classification}"
+        ),
         offensive_value=OffensiveValue(
             classification=classification, # type: ignore
             why=f"{desc}"
