@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Iterable
+from typing import List, Dict, Any, Optional, Iterable, Set, Tuple
 import datetime
 import json
 from dataclasses import asdict, is_dataclass
@@ -9,10 +9,12 @@ class Report:
     """
     Nullpeas unified reporting engine.
     
-    v2.7 Update: "Taxonomy & Visualization Polish"
-    - Added 'pivot' classDef for Internal Pivot chains.
-    - Updated goal mapping for 'root_compromise'.
-    - Improved step styling heuristics for network actions.
+    v3.0 Update: "Boardroom Ready"
+    - Normalized Surface Titles (sudo, docker, etc.).
+    - Human-readable Goal Labels in diagrams.
+    - Confidence scores visible in visual map headers.
+    - Severity Emojis in summary tables.
+    - High-contrast Trap styling.
     """
 
     def __init__(
@@ -77,110 +79,155 @@ class Report:
             lines.append("")
         return lines
 
+    def _normalize_surface(self, surfaces: List[str]) -> str:
+        """Helper to get a clean, human-readable primary surface name."""
+        if "sudo" in surfaces: return "sudo"
+        if "docker" in surfaces: return "docker"
+        if "systemd" in surfaces: return "systemd"
+        if "cron" in surfaces: return "cron"
+        if "path" in surfaces: return "path"
+        if "network" in surfaces: return "network"
+        return surfaces[0] if surfaces else "generic"
+
+    def _select_diverse_chains(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Selects top chains but ensures visual diversity by normalizing surface types.
+        """
+        if not self.attack_chains:
+            return []
+
+        # 1. Sort by Priority then Severity
+        def _sort_key(c: Dict[str, Any]):
+            class_score = {
+                "catastrophic": 0, "critical": 1, "severe": 2, 
+                "high": 3, "useful": 4, "niche": 5
+            }.get(c.get("classification", "niche"), 5)
+            return (c.get("priority", 999), class_score)
+
+        sorted_chains = sorted(self.attack_chains, key=_sort_key)
+        
+        selection = []
+        seen_types: Set[Tuple[str, str]] = set() # (goal, normalized_surface)
+
+        # Pass 1: Pick unique (Goal + Normalized Surface) combos
+        for c in sorted_chains:
+            goal = c.get("goal", "unknown")
+            surfaces = c.get("dependent_surfaces", [])
+            primary = self._normalize_surface(surfaces)
+
+            key = (goal, primary)
+            if key not in seen_types:
+                selection.append(c)
+                seen_types.add(key)
+            
+            if len(selection) >= limit:
+                break
+        
+        # Pass 2: Fill remaining slots if we didn't hit limit
+        if len(selection) < limit:
+            for c in sorted_chains:
+                if c not in selection:
+                    selection.append(c)
+                if len(selection) >= limit:
+                    break
+        
+        return selection
+
     def _render_mermaid(self) -> List[str]:
         if not self.attack_chains:
             return []
 
         lines = ["## Visual Attack Map", "", "```mermaid", "graph TD"]
 
-        # Styles
+        # === Definitions ===
+        lines.append("    %% Node Styles")
+        lines.append("    classDef startNode fill:#eeeeee,stroke:#424242,stroke-width:1px;")
         lines.append("    classDef primitive fill:#e1f5fe,stroke:#01579b,stroke-width:2px;")
-        lines.append("    classDef rootGoal fill:#ffcdd2,stroke:#b71c1c,stroke-width:4px;")
+        
+        # Primitive Subtypes
         lines.append("    classDef fileWrite fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;")
-        lines.append("    classDef persistence fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px;")
         lines.append("    classDef suid fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;")
-        lines.append("    classDef trap fill:#ffe0b2,stroke:#e65100,stroke-width:2px;")
+        # Trap: Red-Orange + Thicker Border
+        lines.append("    classDef trap fill:#ffccbc,stroke:#bf360c,stroke-width:3px;") 
         lines.append("    classDef service fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px;")
         lines.append("    classDef loot fill:#b2dfdb,stroke:#00695c,stroke-width:2px;")
-        lines.append("    classDef pivot fill:#d1c4e9,stroke:#512da8,stroke-width:2px;") # <--- NEW: Purple for Pivot
-        lines.append("    classDef startNode fill:#eeeeee,stroke:#424242,stroke-width:1px;")
+        lines.append("    classDef pivot fill:#d1c4e9,stroke:#512da8,stroke-width:2px;")
 
-        # Re-use same sort logic as _render_attack_chains so diagrams and text match
-        def _sort_key(c: Dict[str, Any]):
-            class_score = {
-                "catastrophic": 0,
-                "critical": 1,
-                "severe": 2,
-                "high": 3,
-                "useful": 4,
-                "niche": 5,
-            }.get(c.get("classification", "niche"), 5)
-            return (c.get("priority", 999), class_score)
+        # Goal Styles (Semantic)
+        lines.append("    classDef goalRoot fill:#ffcdd2,stroke:#b71c1c,stroke-width:4px;")
+        lines.append("    classDef goalPrivesc fill:#e1bee7,stroke:#6a1b9a,stroke-width:3px;")
+        lines.append("    classDef goalCreds fill:#b2dfdb,stroke:#00695c,stroke-width:3px;")
+        lines.append("    classDef goalRecon fill:#eeeeee,stroke:#424242,stroke-width:2px;")
+        lines.append("    classDef goalPivot fill:#d1c4e9,stroke:#512da8,stroke-width:3px;")
+        lines.append("    classDef goalPersist fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px;")
 
-        top_chains = sorted(self.attack_chains, key=_sort_key)[:5]
+        # === Graph Construction ===
+        limit = min(5, len(self.attack_chains))
+        top_chains = self._select_diverse_chains(limit=limit)
 
         for idx, chain in enumerate(top_chains, start=1):
-            goal = chain.get("goal", "Goal")
-            lines.append(f"    subgraph C{idx} [Chain {idx}: {goal}]")
+            raw_goal = chain.get("goal", "unknown")
+            surfaces = chain.get("dependent_surfaces", [])
+            primary_surface = self._normalize_surface(surfaces)
+            conf = chain.get("confidence", {}).get("score", "?")
+            
+            # Contextual Title: "Root Compromise via docker (Confidence 9.5/10)"
+            pretty_goal = raw_goal.replace("_", " ").title()
+            
+            lines.append(f"    subgraph C{idx} [Chain {idx}: {pretty_goal} via {primary_surface} (Confidence {conf}/10)]")
             lines.append("    direction TB")
 
-            # Start node
-            start_node = f"Start_{idx}((Start)):::startNode"
-            lines.append(f"    {start_node}")
-            previous_node = start_node
+            # Declare Start Node once
+            start_id = f"Start_{idx}"
+            lines.append(f"    {start_id}((Start)):::startNode")
+            previous_id = start_id
 
             steps = chain.get("steps", []) or []
             for i, step in enumerate(steps):
-                desc = step.get("description", "Action") or "Step"
+                desc = step.get("description", "Step")
                 node_id = f"C{idx}_S{i}"
+                
+                # Heuristics for styling
                 d_low = desc.lower()
+                style = "primitive"
+                
+                if "write" in d_low or "modify" in d_low: style = "fileWrite"
+                elif "persistence" in d_low: style = "goalPersist"
+                elif "suid" in d_low: style = "suid"
+                elif any(x in d_low for x in ["hijack", "trap", "wait"]): style = "trap"
+                elif any(x in d_low for x in ["systemd", "service", "connect", "mount"]): style = "service"
+                elif any(x in d_low for x in ["harvest", "credential", "shadow", "passwd"]): style = "loot"
+                elif any(x in d_low for x in ["enumerate", "pivot"]): style = "pivot"
 
-                # Default style
-                style_class = "primitive"
+                # Truncate label
+                label = desc.replace('"', "'")
+                if len(label) > 50: label = label[:47] + "..."
 
-                # Heuristics for step types
-                if "write" in d_low or "modify" in d_low:
-                    style_class = "fileWrite"
-                if "persistence" in d_low:
-                    style_class = "persistence"
-                if "suid" in d_low:
-                    style_class = "suid"
-                if "hijack" in d_low or "trap" in d_low:
-                    style_class = "trap"
-                if "systemd" in d_low or "service" in d_low or "connect" in d_low or "mount" in d_low:
-                    style_class = "service"
-                if "harvest" in d_low or "credential" in d_low:
-                    style_class = "loot"
-                if "enumerate" in d_low or "pivot" in d_low:
-                    style_class = "pivot"
-                if "wait for privileged user" in d_low:
-                    style_class = "trap"
+                lines.append(f"    {node_id}[\"{label}\"]:::{style}")
+                lines.append(f"    {previous_id} --> {node_id}")
+                previous_id = node_id
 
-                # Truncate labels nicely with ellipsis if needed
-                safe_desc = desc.replace('"', "'")
-                if len(safe_desc) > 50:
-                    label = safe_desc[:47] + "..."
-                else:
-                    label = safe_desc
+            # Determine Goal Style
+            end_style = "goalRecon"
+            if raw_goal == "root_compromise": end_style = "goalRoot"
+            elif raw_goal == "privilege_escalation": end_style = "goalPrivesc"
+            elif raw_goal == "credential_access": end_style = "goalCreds"
+            elif raw_goal == "internal_pivot": end_style = "goalPivot"
+            elif raw_goal == "persistence": end_style = "goalPersist"
 
-                lines.append(f"    {node_id}[\"{label}\"]:::{style_class}")
-                lines.append(f"    {previous_node} --> {node_id}")
-                previous_node = node_id
-
-            # Goal node styling based on new taxonomy
-            end_node = f"End_{idx}((({goal})))"
-            
-            if goal == "root_compromise": 
-                end_node += ":::rootGoal"
-            elif goal in ("privilege_escalation", "persistence"):
-                end_node += ":::persistence"
-            elif goal in ("credential_access", "reconnaissance"):
-                end_node += ":::loot"
-            elif goal == "internal_pivot":
-                end_node += ":::pivot"
-
-            lines.append(f"    {previous_node} --> {end_node}")
+            # Pretty Label for End Node
+            end_id = f"End_{idx}"
+            lines.append(f"    {end_id}((({pretty_goal}))):::{end_style}")
+            lines.append(f"    {previous_id} --> {end_id}")
             lines.append("    end")
 
         lines.append("```")
         lines.append("")
         return lines
 
-
     def _render_attack_chains(self) -> List[str]:
         if not self.attack_chains: return []
 
-        # Sort: High priority (1) first, then Severe classification
         def _sort_key(c: Dict[str, Any]):
             class_score = {"catastrophic": 0, "critical": 1, "severe": 2, "high": 3, "useful": 4, "niche": 5}.get(c.get("classification", "niche"), 5)
             return (c.get("priority", 999), class_score)
@@ -188,13 +235,13 @@ class Report:
         sorted_chains = sorted(self.attack_chains, key=_sort_key)
         
         lines = []
-        lines.append("## Offensive Attack Chains")
+        lines.append("## Offensive Attack Chains") 
         lines.append(f"**Total Chains Identified:** {len(sorted_chains)}")
         lines.append("")
 
         # --- PART 1: TOP 5 FULL DETAIL ---
-        lines.append("### 🔥 Top Critical Chains")
-        lines.append("Detailed analysis of the most dangerous paths found.")
+        lines.append("### 🔥 Top Priority Chains")
+        lines.append("Detailed analysis of the most impactful and realistic paths found.")
         lines.append("")
 
         for idx, c in enumerate(sorted_chains[:5], start=1):
@@ -236,11 +283,21 @@ class Report:
                 goal = c.get("goal", "")
                 cls = c.get("classification", "")
                 exp = c.get("exploitability", "")
+                
+                # Severity Emojis
+                sev_icon = {
+                    "catastrophic": "☠️", 
+                    "critical": "🔥", 
+                    "severe": "🚨", 
+                    "high": "⚠️", 
+                    "useful": "ℹ️"
+                }.get(cls, "")
+
                 vec = "Unknown"
                 if c.get("steps"):
                     vec = c["steps"][0].get("description", "")[:50]
                 
-                lines.append(f"| `...{cid}` | {goal} | {cls} | {exp} | {vec} |")
+                lines.append(f"| `...{cid}` | {goal} | {sev_icon} {cls} | {exp} | {vec} |")
             
             lines.append("")
 
