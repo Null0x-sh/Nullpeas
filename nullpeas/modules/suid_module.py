@@ -1,5 +1,5 @@
 """
-nullpeas/modules/suid_enum.py
+nullpeas/modules/suid_module.py
 Analyses SUID/SGID binaries for known privilege escalation vectors.
 """
 
@@ -23,7 +23,7 @@ KNOWN_SUID_BINS = {
     "env", "python", "python3", "perl", "ruby", "lua", "php",
     "vim", "vi", "nano", "find", "awk", "nmap", "gdb", "man", "less", "more",
     "cp", "mv", "chown", "chmod", "date", "base64", "tar", "zip",
-    "systemctl", "docker", "snap",
+    "systemctl", "docker", "snap", "git", "sed", "pip"
 }
 
 
@@ -80,15 +80,19 @@ def _build_suid_primitive(entry: Dict[str, Any], user_name: str) -> Optional[Pri
     # Classification
     if is_known:
         primitive_type = "root_shell_primitive"
-        severity_band = "Critical"
         confidence_score = 9.5
         why = f"Known GTFOBin '{binary}' has SUID bit set. Trivial root escalation."
+        classification = "catastrophic"
+        exploitability = "trivial"
+        stability = "safe"
     else:
         # Unknown custom SUID binary
         primitive_type = "suid_primitive" 
-        severity_band = "Medium" 
         confidence_score = 6.0
         why = f"Unknown SUID binary '{binary}'. May be vulnerable to buffer overflows or logic bugs."
+        classification = "useful"
+        exploitability = "advanced"
+        stability = "unknown"
 
     confidence = PrimitiveConfidence(
         score=confidence_score,
@@ -96,7 +100,7 @@ def _build_suid_primitive(entry: Dict[str, Any], user_name: str) -> Optional[Pri
     )
 
     offensive_value = OffensiveValue(
-        classification="catastrophic" if is_known else "useful",
+        classification=classification,
         why=why
     )
 
@@ -106,8 +110,8 @@ def _build_suid_primitive(entry: Dict[str, Any], user_name: str) -> Optional[Pri
         type=primitive_type,
         run_as="root",
         origin_user=user_name,
-        exploitability="trivial" if is_known else "advanced",
-        stability="safe" if is_known else "risky",
+        exploitability=exploitability,
+        stability=stability,
         noise="low",
         confidence=confidence,
         offensive_value=offensive_value,
@@ -120,7 +124,7 @@ def _build_suid_primitive(entry: Dict[str, Any], user_name: str) -> Optional[Pri
             "root_goal_candidate": is_known,
         },
         affected_resource=path, # For chaining
-        module_source="suid_enum",
+        module_source="suid_module",
         probe_source="suid_probe",
     )
 
@@ -128,17 +132,12 @@ def _build_suid_primitive(entry: Dict[str, Any], user_name: str) -> Optional[Pri
 
 
 @register_module(
-    key="suid_enum",
+    key="suid_module",
     description="Scan for SUID/SGID binaries that allow privilege escalation",
-    required_triggers=["is_root"], # We skip if we are ALREADY root, but otherwise we always want to check this
-    # Actually, SUID checks don't need a specific trigger, they are a primary probe.
-    # In Nullpeas architecture, modules run if triggers match. 
-    # We should add a 'always_run' or specific trigger.
-    # For now, let's assume we create a trigger 'fs_suid_present' in the Brain, or just rely on 'path_entries_present' as a dummy.
-    # BETTER: Let's rely on a new trigger.
+    required_triggers=["suid_files_present"], # <--- FIXED: Runs if SUID files are found
 )
 def run(state: Dict[str, Any], report: Report):
-    # Check trigger manually if the decorator doesn't block it
+    # Safety check: if we are already root, we might skip logic
     if state.get("triggers", {}).get("is_root"):
         return
 
