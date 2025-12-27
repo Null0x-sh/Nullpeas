@@ -9,7 +9,7 @@ class Report:
     """
     Nullpeas unified reporting engine.
     
-    v3.0 Update: "Boardroom Ready"
+    v3.0 Update:
     - Normalized Surface Titles (sudo, docker, etc.).
     - Human-readable Goal Labels in diagrams.
     - Confidence scores visible in visual map headers.
@@ -171,13 +171,11 @@ class Report:
             primary_surface = self._normalize_surface(surfaces)
             conf = chain.get("confidence", {}).get("score", "?")
             
-            # Contextual Title: "Root Compromise via docker (Confidence 9.5/10)"
             pretty_goal = raw_goal.replace("_", " ").title()
             
             lines.append(f"    subgraph C{idx} [Chain {idx}: {pretty_goal} via {primary_surface} (Confidence {conf}/10)]")
             lines.append("    direction TB")
 
-            # Declare Start Node once
             start_id = f"Start_{idx}"
             lines.append(f"    {start_id}((Start)):::startNode")
             previous_id = start_id
@@ -187,7 +185,6 @@ class Report:
                 desc = step.get("description", "Step")
                 node_id = f"C{idx}_S{i}"
                 
-                # Heuristics for styling
                 d_low = desc.lower()
                 style = "primitive"
                 
@@ -199,7 +196,6 @@ class Report:
                 elif any(x in d_low for x in ["harvest", "credential", "shadow", "passwd"]): style = "loot"
                 elif any(x in d_low for x in ["enumerate", "pivot"]): style = "pivot"
 
-                # Truncate label
                 label = desc.replace('"', "'")
                 if len(label) > 50: label = label[:47] + "..."
 
@@ -207,7 +203,6 @@ class Report:
                 lines.append(f"    {previous_id} --> {node_id}")
                 previous_id = node_id
 
-            # Determine Goal Style
             end_style = "goalRecon"
             if raw_goal == "root_compromise": end_style = "goalRoot"
             elif raw_goal == "privilege_escalation": end_style = "goalPrivesc"
@@ -215,7 +210,6 @@ class Report:
             elif raw_goal == "internal_pivot": end_style = "goalPivot"
             elif raw_goal == "persistence": end_style = "goalPersist"
 
-            # Pretty Label for End Node
             end_id = f"End_{idx}"
             lines.append(f"    {end_id}((({pretty_goal}))):::{end_style}")
             lines.append(f"    {previous_id} --> {end_id}")
@@ -239,13 +233,13 @@ class Report:
         lines.append(f"**Total Chains Identified:** {len(sorted_chains)}")
         lines.append("")
 
-        # --- PART 1: TOP 5 FULL DETAIL ---
         lines.append("### 🔥 Top Priority Chains")
         lines.append("Detailed analysis of the most impactful and realistic paths found.")
         lines.append("")
 
         for idx, c in enumerate(sorted_chains[:5], start=1):
-            goal = c.get("goal", "unknown")
+            goal_raw = c.get("goal", "unknown")
+            goal = goal_raw.replace("_", " ").title()
             lines.append(f"#### {idx}. {goal} ({c.get('classification')})")
             lines.append(f"- **Truth:** {c.get('offensive_truth', 'N/A')}")
             
@@ -253,13 +247,20 @@ class Report:
             lines.append(f"- **Confidence:** {conf_score}/10")
             
             if c.get("steps"):
+                lines.append("")
                 lines.append("**Attack Path:**")
-                for s in c["steps"]:
-                    lines.append(f"1. `{s.get('primitive_id')}` -> {s.get('description')}")
-            
+                lines.append("")
+                for i, s in enumerate(c.get("steps", []), start=1):
+                    desc = s.get("description", "Step")
+                    pid = s.get("primitive_id", "")
+                    if pid:
+                        lines.append(f"{i}. **{desc}**  (`{pid}`)")
+                    else:
+                        lines.append(f"{i}. **{desc}**")
+                lines.append("")
+
             cmds = c.get("exploit_commands", [])
             if cmds:
-                lines.append("")
                 lines.append("```bash")
                 for cmd in cmds: lines.append(cmd)
                 lines.append("```")
@@ -267,7 +268,6 @@ class Report:
             lines.append("---")
             lines.append("")
 
-        # --- PART 2: COMPACT TABLE FOR THE REST ---
         if len(sorted_chains) > 5:
             lines.append("### 📋 Additional Chains")
             lines.append("Summary of other identified vectors.")
@@ -276,7 +276,6 @@ class Report:
             lines.append("|---|---|---|---|---|")
             
             for c in sorted_chains[5:]:
-                # Show unique hash suffix
                 full_id = c.get("chain_id", "")
                 cid = full_id.split("_")[-1] if "_" in full_id else full_id[:8]
                 
@@ -284,7 +283,6 @@ class Report:
                 cls = c.get("classification", "")
                 exp = c.get("exploitability", "")
                 
-                # Severity Emojis
                 sev_icon = {
                     "catastrophic": "☠️", 
                     "critical": "🔥", 
