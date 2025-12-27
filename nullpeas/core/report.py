@@ -9,10 +9,9 @@ class Report:
     """
     Nullpeas unified reporting engine.
     
-    v2.2 Update: "Polished Rendering"
-    - Visual Map: Capped at Top 5 chains for readability.
-    - Table: Fixed ID truncation (shows unique hash).
-    - Mermaid: Increased label length for better context.
+    v2.3 Update: "Loot Integration"
+    - Added 'loot' classDef for Mermaid visualization.
+    - Ensures credential/recon chains are visually distinct.
     """
 
     def __init__(
@@ -89,8 +88,9 @@ class Report:
         lines.append("    classDef suid fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;")
         lines.append("    classDef trap fill:#ffe0b2,stroke:#e65100,stroke-width:2px;")
         lines.append("    classDef service fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px;")
+        lines.append("    classDef loot fill:#b2dfdb,stroke:#00695c,stroke-width:2px;") # <--- NEW: Loot Style
 
-        # v2.2 FIX: Only render Top 5 chains to keep diagram clean
+        # Only render Top 5 chains to keep diagram clean
         for idx, chain in enumerate(self.attack_chains[:5], start=1):
             goal = chain.get("goal", "Goal")
             lines.append(f"    subgraph C{idx} [Chain {idx}: {goal}]")
@@ -109,8 +109,9 @@ class Report:
                 elif "suid" in d_low: style_class = "suid"
                 elif "hijack" in d_low or "trap" in d_low: style_class = "trap"
                 elif "systemd" in d_low or "service" in d_low: style_class = "service"
+                elif "harvest" in d_low or "credential" in d_low: style_class = "loot" # <--- Apply Style
                 
-                # v2.2 FIX: Increased label length to 50 chars
+                # Increased label length to 50 chars
                 label = desc.replace('"', "'")[:50]
                 lines.append(f"    {node_id}[\"{label}\"]:::{style_class}")
                 lines.append(f"    {previous_node} --> {node_id}")
@@ -128,7 +129,7 @@ class Report:
 
         # Sort: High priority (1) first, then Severe classification
         def _sort_key(c: Dict[str, Any]):
-            class_score = {"catastrophic": 0, "severe": 1, "useful": 2, "niche": 3}.get(c.get("classification", "niche"), 3)
+            class_score = {"catastrophic": 0, "critical": 1, "severe": 2, "high": 3, "useful": 4, "niche": 5}.get(c.get("classification", "niche"), 5)
             return (c.get("priority", 999), class_score)
 
         sorted_chains = sorted(self.attack_chains, key=_sort_key)
@@ -175,7 +176,7 @@ class Report:
             lines.append("|---|---|---|---|---|")
             
             for c in sorted_chains[5:]:
-                # v2.2 FIX: Show unique hash suffix instead of truncated prefix
+                # Show unique hash suffix
                 full_id = c.get("chain_id", "")
                 cid = full_id.split("_")[-1] if "_" in full_id else full_id[:8]
                 
