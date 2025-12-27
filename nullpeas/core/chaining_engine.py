@@ -47,18 +47,18 @@ GOAL_PRIORITY = {
     "persistence": 3,
     "credential_access": 4,
     "lateral_movement": 5,
-    "reconnaissance": 6, 
+    "reconnaissance": 6,
 }
 
 LOOT_TYPES = {"credential_file", "password_store", "config_file", "info_disclosure"}
 
 CLASS_WEIGHT = {
-    "catastrophic": 10, # Guaranteed Root / Game Over
-    "critical": 9,      # Immediate high risk (SSH Keys, Shadow file)
-    "severe": 7,        # High risk but might need extra steps
-    "high": 6,          # Added for safety
-    "useful": 4,        # Good for pivoting/recon
-    "niche": 1,         # Edge cases
+    "catastrophic": 10,  # Guaranteed Root / Game Over
+    "critical": 9,       # Immediate high risk (SSH Keys, Shadow file)
+    "severe": 7,         # High risk but might need extra steps
+    "high": 6,           # Added for safety
+    "useful": 4,         # Good for pivoting/recon
+    "niche": 1,          # Edge cases
 }
 
 EXPLOIT_WEIGHT = {
@@ -99,14 +99,14 @@ def _offensive_truth_for(primitive: Primitive) -> str:
 
     if t == "cron_exec_primitive":
         return "This provides timed and repeatable privileged execution. It is a persistence and escalation vector."
-    
+
     if t == "path_hijack_surface":
         return "Writable PATH directory allows interception of commands run by other users. High-value trap."
-        
+
     # === Capabilities Truths ===
     if t == "group_pivot_primitive":
         return "Binary has 'cap_setgid'. Allows pivoting to sensitive groups (disk, shadow) which often leads to root."
-    
+
     if t == "arbitrary_file_access_primitive":
         return "Binary has 'cap_dac_override'. Bypasses all file permissions to Read/Write ANY file on the system."
 
@@ -124,10 +124,16 @@ def _offensive_truth_for(primitive: Primitive) -> str:
     # === Loot Truths ===
     if t == "credential_file":
         return "Discovered credentials often allow immediate lateral movement or access to critical infrastructure."
+
     if t == "password_store":
+        # Extra polish: reflect unreadable vs readable shadow-style loot
+        if primitive.exploitability == "theoretical":
+            return "Password hashes file exists but is not readable from this account. Valuable recon, but not directly exploitable without another pivot."
         return "Access to password hashes allows offline cracking and potential impersonation of users."
+
     if t == "config_file":
         return "Configuration files frequently contain hardcoded database passwords, API keys, or internal network details."
+
     if t == "info_disclosure":
         return "Historical commands and environment configs provide critical context for pivoting and identifying high-value targets."
 
@@ -147,7 +153,7 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
     for p in primitives:
         # Direct Root Win Chains
         if p.type in {"root_shell_primitive", "docker_host_takeover", "suid_primitive"}:
-            
+
             chain = AttackChain(
                 chain_id=new_chain_id("root"),
                 goal="root_shell",
@@ -202,31 +208,35 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
         # === Loot & Intelligence ===
         if p.type in LOOT_TYPES:
-            
+
             target_file = p.context.get("path", "file")
-            cmds = [f"cat {target_file}"]
-            
+
+            # v2.5 Fix: Only generate exploit command if NOT theoretical
+            cmds = []
+            if p.exploitability != "theoretical":
+                cmds = [f"cat {target_file}"]
+
             # Default goal/priority
             goal = "credential_access"
             priority = 4
             summary_text = f"Intelligence collection via {p.surface}"
-            
+
             # 1. Info Disclosure Adjustment
             if p.type == "info_disclosure":
                 goal = "reconnaissance"
-                priority = 5  
-            
+                priority = 5
+
             # 2. Summary Adjustment
             if p.type in {"credential_file", "password_store"}:
                 summary_text = f"Credential harvest via {p.surface}"
-            
+
             chain = AttackChain(
                 chain_id=new_chain_id("loot"),
                 goal=goal,
                 priority=priority,
                 exploitability=p.exploitability,
-                stability=p.stability, # Dynamic: Inherit from primitive
-                noise=p.noise,         # Dynamic: Inherit from primitive
+                stability=p.stability,  # Dynamic: Inherit from primitive
+                noise=p.noise,          # Dynamic: Inherit from primitive
                 classification=p.offensive_value.classification,
                 summary=summary_text,
                 offensive_truth=_offensive_truth_for(p),
@@ -251,23 +261,23 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
     5. DAC Override -> File Write -> Service (New)
     """
     chains = []
-    
+
     # Index file writes by the resource they control
     writes = {
-        p.affected_resource: p 
-        for p in primitives 
+        p.affected_resource: p
+        for p in primitives
         if p.type == "arbitrary_file_write_primitive" and p.affected_resource
     }
-    
+
     # Detect CAP_DAC_OVERRIDE (Universal Writer)
     universal_writers = [p for p in primitives if p.type == "arbitrary_file_access_primitive"]
 
     # 1. Service Hijacking (Generic Write Config -> Restart Service)
     services = [p for p in primitives if p.surface in {"systemd", "services"}]
-    
+
     for svc in services:
         config_path = svc.context.get("unit_file_path") or svc.context.get("config_path")
-        
+
         # A) Standard File Write Logic
         if config_path and config_path in writes:
             writer = writes[config_path]
@@ -283,7 +293,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
     for c in cron_primitives:
         goal = "privilege_escalation" if c.run_as == "root" else "persistence"
-        
+
         chain = AttackChain(
             chain_id=new_chain_id("timed"),
             goal=goal,
@@ -308,15 +318,15 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
     # 3. PATH Hijacking
     path_primitives = [p for p in primitives if p.type == "path_hijack_surface"]
-    
+
     for p in path_primitives:
         chain = AttackChain(
             chain_id=new_chain_id("trap"),
             goal="privilege_escalation",
             priority=3,
             exploitability=p.exploitability,
-            stability=p.stability, # Dynamic
-            noise=p.noise,         # Dynamic
+            stability=p.stability,  # Dynamic
+            noise=p.noise,          # Dynamic
             classification="severe",
             summary=f"PATH Interception via {p.affected_resource}",
             offensive_truth=_offensive_truth_for(p),
@@ -335,7 +345,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
     # 4. Systemd Service Abuse
     systemd_primitives = [
-        p for p in primitives 
+        p for p in primitives
         if p.type in {"systemd_unit_write", "systemd_binary_write", "systemd_relative_path"}
     ]
 
@@ -348,7 +358,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
         chain = AttackChain(
             chain_id=new_chain_id("service"),
-            goal="privilege_escalation", 
+            goal="privilege_escalation",
             priority=2,
             exploitability=p.exploitability,
             stability=p.stability,
@@ -372,11 +382,11 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
     return chains
 
 
-def _create_service_write_chain(writer: Primitive, svc: Primitive, target: str, method="fs") -> AttackChain:
+def _create_service_write_chain(writer: Primitive, svc: Primitive, target: str, method: str = "fs") -> AttackChain:
     """Helper to build file write -> service restart chain"""
     truth = "This chain reliably converts file write into root persistence."
     desc = f"Modify {target} via {writer.surface}"
-    
+
     if method == "capabilities":
         truth = "Using CAP_DAC_OVERRIDE bypasses file permissions to overwrite the service unit."
         desc = f"Overwrite {target} using binary with cap_dac_override"
@@ -400,7 +410,7 @@ def _create_service_write_chain(writer: Primitive, svc: Primitive, target: str, 
             score=min(writer.confidence.score, svc.confidence.score),
             reason="Validated resource intersection"
         ),
-        exploit_commands=[] 
+        exploit_commands=[]
     )
 
 
