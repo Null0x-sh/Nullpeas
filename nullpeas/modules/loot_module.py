@@ -1,6 +1,11 @@
 """
 nullpeas/modules/loot_module.py
 Analyzes discovered files for sensitive information (credentials, history).
+v2.3 Improvements:
+- Reports 'unknown' loot so nothing silently vanishes.
+- Refined exploitability for password hashes (moderate vs trivial).
+- Added Python type hints.
+- Dead code (config_secret) kept as placeholder for future probe updates.
 """
 
 from typing import Dict, Any, List
@@ -16,7 +21,7 @@ from nullpeas.core.offensive_schema import (
 @register_module(
     key="loot_module",
     description="Analyze file system for sensitive loot (SSH keys, history, configs)",
-    required_triggers=[], # Runs if probe has data
+    required_triggers=[], 
 )
 def run(state: Dict[str, Any], report: Report):
     loot_data = state.get("loot", {})
@@ -36,102 +41,150 @@ def run(state: Dict[str, Any], report: Report):
     lines.append("These files often contain hardcoded credentials, keys, or historic commands.")
     lines.append("")
 
-    # Group by category for cleaner report
+    # Group by category safely
     by_cat = {}
     for item in found_items:
-        cat = item["category"]
-        if cat not in by_cat: by_cat[cat] = []
-        by_cat[cat].append(item["path"])
+        cat = item.get("category", "unknown")
+        by_cat.setdefault(cat, []).append(item["path"])
 
-    # SSH Keys
+    # 1. Critical Credentials (SSH, Shadow, SCM)
+    if "password_hashes" in by_cat:
+        lines.append("### 🚨 Password Hashes (Shadow)")
+        for p in by_cat["password_hashes"]:
+            lines.append(f"- `{p}`")
+            # Distinct type 'password_store'
+            primitives.append(_make_primitive(
+                p, "critical", "password_hashes", "password_store", 
+                "Readable shadow file found.", origin_user, origin_user
+            ))
+        lines.append("")
+
     if "ssh_key" in by_cat:
         lines.append("### 🔑 SSH & Access Keys")
         for p in by_cat["ssh_key"]:
             lines.append(f"- `{p}`")
-            
-            # Create Primitive
-            if "id_" in p and ".pub" not in p: # Private keys only
-                primitives.append(Primitive(
-                    id=new_primitive_id("loot", "ssh_key"),
-                    surface="file_system",
-                    type="credential_file",
-                    run_as="current_user",
-                    origin_user=origin_user,
-                    exploitability="trivial",
-                    stability="safe",
-                    noise="low",
-                    confidence=PrimitiveConfidence(score=10.0, reason="Private SSH key found"),
-                    offensive_value=OffensiveValue(
-                        classification="critical",
-                        why="Private SSH keys allow immediate lateral movement or persistence."
-                    ),
-                    context={"path": p},
-                    affected_resource=p,
-                    module_source="loot_module",
-                    probe_source="loot_probe"
+            if "id_" in p and ".pub" not in p:
+                primitives.append(_make_primitive(
+                    p, "critical", "ssh_key", "credential_file", 
+                    "Private SSH key found.", origin_user, origin_user
                 ))
         lines.append("")
 
-    # Cloud Creds
+    if "scm_creds" in by_cat:
+        lines.append("### 🐙 Source Control Credentials")
+        for p in by_cat["scm_creds"]:
+            lines.append(f"- `{p}`")
+            primitives.append(_make_primitive(
+                p, "severe", "scm_creds", "credential_file", 
+                "Git credentials file found.", origin_user, origin_user
+            ))
+        lines.append("")
+
+    # 2. Cloud & Infrastructure
     if "cloud_creds" in by_cat:
         lines.append("### ☁️ Cloud Credentials")
         for p in by_cat["cloud_creds"]:
             lines.append(f"- `{p}`")
-            
-            primitives.append(Primitive(
-                id=new_primitive_id("loot", "cloud_creds"),
-                surface="file_system",
-                type="credential_file",
-                run_as="current_user",
-                origin_user=origin_user,
-                exploitability="trivial",
-                stability="safe",
-                noise="low",
-                confidence=PrimitiveConfidence(score=9.0, reason="Cloud credentials file found"),
-                offensive_value=OffensiveValue(
-                    classification="severe",
-                    why="Cloud credentials often allow data exfiltration or infrastructure control."
-                ),
-                context={"path": p},
-                affected_resource=p,
-                module_source="loot_module",
-                probe_source="loot_probe"
+            primitives.append(_make_primitive(
+                p, "severe", "cloud_creds", "credential_file", 
+                "Cloud credentials file found.", origin_user, origin_user
+            ))
+        lines.append("")
+        
+    if "container_config" in by_cat:
+        lines.append("### 🐳 Container Configuration")
+        for p in by_cat["container_config"]:
+            lines.append(f"- `{p}`")
+            primitives.append(_make_primitive(
+                p, "useful", "container_config", "info_disclosure", 
+                "Container config (docker-compose) found.", origin_user, origin_user
             ))
         lines.append("")
 
-    # Configs
+    # 3. Application Configs
+    if "web_config" in by_cat:
+        lines.append("### 🌐 Web Configuration Secrets")
+        for p in by_cat["web_config"]:
+            lines.append(f"- `{p}`")
+            primitives.append(_make_primitive(
+                p, "useful", "web_config", "config_file", 
+                "Web config likely containing DB creds.", origin_user, origin_user
+            ))
+        lines.append("")
+        
+    # Generic 'config_secret' (Placeholder for future probe updates)
     if "config_secret" in by_cat:
-        lines.append("### ⚙️ Configuration Secrets")
+        lines.append("### ⚙️ Other Configuration Secrets")
         for p in by_cat["config_secret"]:
             lines.append(f"- `{p}`")
-            # Configs are context dependent, marked as useful/severe
-            primitives.append(Primitive(
-                id=new_primitive_id("loot", "config"),
-                surface="file_system",
-                type="sensitive_file",
-                run_as="current_user",
-                origin_user=origin_user,
-                exploitability="moderate", # Requires reading/parsing
-                stability="safe",
-                noise="low",
-                confidence=PrimitiveConfidence(score=7.0, reason="Potential secret in config file"),
-                offensive_value=OffensiveValue(
-                    classification="useful",
-                    why="Configuration files often contain database passwords or API keys."
-                ),
-                context={"path": p},
-                affected_resource=p,
-                module_source="loot_module",
-                probe_source="loot_probe"
-            ))
         lines.append("")
 
-    # History
+    # 4. History
     if "shell_history" in by_cat:
         lines.append("### 📜 Shell History")
         for p in by_cat["shell_history"]:
             lines.append(f"- `{p}`")
-            # History is useful info disclosure
+            primitives.append(_make_primitive(
+                p, "useful", "shell_history", "info_disclosure", 
+                "Shell history file found.", origin_user, origin_user
+            ))
         lines.append("")
 
+    # 5. Unknown / Unclassified (Safety Net)
+    if "unknown" in by_cat:
+        lines.append("### 🧩 Other Potential Loot (Unclassified)")
+        for p in by_cat["unknown"]:
+            lines.append(f"- `{p}`")
+        lines.append("")
+
+    if loot_data.get("error"):
+        lines.append(f"> ⚠️ **Note:** {loot_data['error']}")
+
     report.add_section("Loot Analysis", lines)
+
+def _make_primitive(
+    path: str, 
+    classification: str, 
+    type_id: str, 
+    ptype: str, 
+    why: str, 
+    user: str, 
+    run_as: str
+) -> Primitive:
+    """
+    Helper to keep the loop clean.
+    """
+    score_map = {
+        "critical": 10.0,
+        "severe": 9.0,
+        "useful": 7.0,
+        "niche": 4.0
+    }
+    score = score_map.get(classification, 7.0)
+
+    # Determine exploitability
+    exploitability = "trivial" # Default for reading text files
+    
+    # Hashes require cracking -> Moderate
+    if type_id == "password_hashes":
+        exploitability = "moderate"
+    # Useful info often needs parsing/inference -> Moderate
+    elif classification == "useful":
+        exploitability = "moderate"
+
+    return Primitive(
+        id=new_primitive_id("loot", type_id),
+        surface="file_system",
+        type=ptype,
+        run_as=run_as,
+        origin_user=user,
+        exploitability=exploitability, # type: ignore
+        stability="safe",
+        noise="low",
+        confidence=PrimitiveConfidence(score=score, reason=why),
+        offensive_value=OffensiveValue(classification=classification, why=why), # type: ignore
+        context={"path": path},
+        affected_resource=path,
+        module_source="loot_module",
+        probe_source="loot_probe"
+    )
