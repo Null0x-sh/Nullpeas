@@ -2,6 +2,11 @@
 nullpeas/probes/loot_probe.py
 Enumerates sensitive files (Loot) in targeted high-probability directories.
 Optimized for speed: Does not scan the entire filesystem.
+v2.1 Improvements:
+- Tightened filename list to reduce noise.
+- Result capping (200 items) for safety.
+- Richer semantic classification.
+- Sorted/Deduped output.
 """
 
 import subprocess
@@ -21,28 +26,30 @@ TARGET_DIRS = [
     "/tmp",         # Lazy admin drops
 ]
 
-# Exact filename matches we care about
+# Exact filename matches we care about - Tightened for v2.1
 INTERESTING_FILES = {
     # SSH / Keys
-    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "authorized_keys", "known_hosts",
-    "id_rsa.pub", "id_ed25519.pub", # Pub keys are useful for knowing WHO accesses this box
-    
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    "id_rsa.pub", "id_ed25519.pub",
+    "authorized_keys", "known_hosts",
+
     # History
     ".bash_history", ".zsh_history", ".mysql_history", ".psql_history", ".dbshell",
-    
+
     # Cloud / Configs
-    "credentials",  # .aws/credentials
-    "config",       # .kube/config
-    ".env",         # Docker/Node secrets
-    "wp-config.php",
-    "LocalSettings.php",
-    "config.php",
-    
-    # Generic
-    "shadow",       # /etc/shadow backup copies?
-    "passwd",       # Useful context
-    "master.key",   # Rails
+    "credentials",           # .aws/credentials
+    "config.json",           # Docker, cloud CLIs, etc.
+    "settings.json",
+    ".env", "wp-config.php", "LocalSettings.php", "config.php",
+
+    # Generic / sensitive
+    "shadow", "passwd",
+    "master.key",            # Rails
+    ".git-credentials",
+    "docker-compose.yml",
 }
+
+MAX_RESULTS = 200  # Safety cap to prevent massive state blobs
 
 def run(state: Dict[str, Any]) -> None:
     loot_data = {
@@ -65,14 +72,11 @@ def run(state: Dict[str, Any]) -> None:
         return
 
     # 2. Build Find Command
-    # find /home /etc ... -maxdepth 4 ( -name id_rsa -o -name .bash_history ... ) -type f -print
-    # We limit depth to 4 to prevent getting lost in deep node_modules or similar structures
     cmd = ["find"]
     cmd.extend(valid_targets)
     cmd.extend(["-maxdepth", "5"])
     
     # Build the OR clause for filenames
-    # \( -name "id_rsa" -o -name ".env" ... \)
     cmd.append("(")
     first = True
     for fname in INTERESTING_FILES:
@@ -105,29 +109,43 @@ def run(state: Dict[str, Any]) -> None:
 
     # 3. Process Results
     if raw_output:
-        paths = raw_output.strip().split('\n')
+        # Sort and dedupe for nicer reporting and consistency
+        paths = sorted(set(raw_output.strip().split('\n')))
         
         for p in paths:
             path = p.strip()
             if not path:
                 continue
-                
-            # Filter out some noise? (e.g. inside "node_modules")
+            
+            # Safety Cap Check
+            if len(loot_data["found"]) >= MAX_RESULTS:
+                loot_data["error"] = (
+                    f"Result cap reached ({MAX_RESULTS}). Listing truncated for stealth/performance."
+                )
+                break
+
+            # Filter out some noise (e.g. inside "node_modules")
             if "node_modules" in path:
                 continue
                 
-            # Basic Classification
+            # Richer Classification
             name = os.path.basename(path)
             category = "unknown"
-            
-            if "id_" in name or "key" in name:
+
+            if "ssh" in path or name.startswith("id_") or "key" in name:
                 category = "ssh_key"
             elif "history" in name:
                 category = "shell_history"
-            elif ".env" in name or "config" in name:
-                category = "config_secret"
+            elif ".git-credentials" in name:
+                category = "scm_creds"
+            elif ".env" in name or "config.php" in name or "wp-config.php" in name:
+                category = "web_config"
+            elif "docker-compose" in name:
+                category = "container_config"
             elif "credentials" in name:
                 category = "cloud_creds"
+            elif "shadow" in name:
+                category = "password_hashes"
                 
             loot_data["found"].append({
                 "path": path,
