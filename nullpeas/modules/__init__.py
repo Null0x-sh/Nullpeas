@@ -51,23 +51,9 @@ def get_available_modules(triggers: Dict[str, bool]) -> List[Dict[str, Any]]:
 # =============================================================================
 # EXPLICIT IMPORTS (WIRED IN)
 # =============================================================================
-# We must manually import modules here so the @register_module decorator runs.
-# These names MUST match the filenames in your nullpeas/modules/ folder.
-
-# 1. sudo_enum_module.py
 from . import sudo_enum_module
-
-# 2. cron_enum_module.py
 from . import cron_enum_module
-
-# 3. docker_enum.py (This one looks correctly named in your screenshot)
 from . import docker_enum
-
-# 4. systemd_module.py
 from . import systemd_module
-
-# 5. suid_module.py
 from . import suid_module
-
-# 6. path_enum_module.py (If you want to enable it now)
-# from . import path_enum_module
+from . import path_enum_module
