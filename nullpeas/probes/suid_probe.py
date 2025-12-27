@@ -1,75 +1,114 @@
 """
-nullpeas/probes/suid_probe.py
-Finds SUID and SGID binaries on the filesystem.
+nullpeas/probes/systemd_probe.py
+Enumerates systemd service units to find writable configurations or binaries.
 """
 
 from typing import Dict, Any, List
-import shutil
+import os
+import re
 
-from nullpeas.core.exec import run_command
+# Standard paths for systemd units
+UNIT_PATHS = [
+    "/etc/systemd/system",
+    "/lib/systemd/system",
+    "/usr/lib/systemd/system",
+    "/run/systemd/system",
+]
 
+def _parse_exec_start(content: str) -> str:
+    """
+    Simple regex to pull the binary path from ExecStart=...
+    Ignores arguments, flags, etc.
+    
+    Updated to handle systemd prefixes: -, @, !, +
+    """
+    # Look for ExecStart followed by optional prefixes [-@!+], then the path.
+    match = re.search(r'^ExecStart=[-@!+]*\s*([^\s]+)', content, re.MULTILINE)
+    if match:
+        return match.group(1)
+    return ""
 
 def run(state: Dict[str, Any]) -> None:
-    suid_info: Dict[str, Any] = {
-        "found": [],
+    systemd_data: Dict[str, Any] = {
+        "units": [],
+        "writable_units": [],
+        "writable_binaries": [],
+        "relative_paths": [],
         "error": None,
-        "method": "unknown",
     }
 
-    if shutil.which("find") is None:
-        suid_info["error"] = "find binary not present"
-        state["suid"] = suid_info
-        return
+    scanned_units = set()
 
-    # === OPTIMIZATION ===
-    # Exclude heavy directories typical in containers/dev environments.
-    # /workspaces contains source code (git, node_modules) -> massive scan time.
-    prune_paths = [
-        "/proc", "/sys", "/dev", "/run", "/tmp",
-        "/snap", "/var/lib/snapd", "/var/lib/flatpak",
-        "/workspaces", "/home/codespace/.vscode-server"
-    ]
-    
-    prune_args = []
-    for p in prune_paths:
-        prune_args.extend(["-path", p, "-prune", "-o"])
+    for base_dir in UNIT_PATHS:
+        if not os.path.isdir(base_dir):
+            continue
 
-    # find / (prunes) -type f \( -perm -4000 -o -perm -2000 \) -print
-    cmd = ["find", "/"] + prune_args + [
-        "-type", "f",
-        "(", "-perm", "-4000", "-o", "-perm", "-2000", ")",
-        "-print"
-    ]
+        try:
+            for filename in os.listdir(base_dir):
+                if not filename.endswith(".service"):
+                    continue
+                
+                full_path = os.path.join(base_dir, filename)
+                
+                # Deduplicate (same unit name might exist in multiple folders)
+                if filename in scanned_units:
+                    continue
+                scanned_units.add(filename)
 
-    # Increased timeout from 20s to 60s to handle slow container I/O
-    res = run_command(cmd, timeout=60, strip_output=True)
+                # 1. Check if Unit File is Writable
+                # We strictly check if WE can write to it.
+                try:
+                    can_write_unit = os.access(full_path, os.W_OK)
+                except OSError:
+                    can_write_unit = False
+                
+                # 2. Parse Content
+                try:
+                    with open(full_path, 'r', errors='ignore') as f:
+                        content = f.read()
+                except:
+                    continue
 
-    if res["timed_out"]:
-        suid_info["error"] = "find command timed out after 60s"
-        state["suid"] = suid_info
-        return
+                exec_binary = _parse_exec_start(content)
+                
+                # 3. Check Binary Permissions
+                can_write_binary = False
+                is_relative = False
+                
+                if exec_binary:
+                    # Check for relative path (no leading /)
+                    # Some paths might be valid systemd vars (e.g. ${...}), we skip those to avoid FPs
+                    if not exec_binary.startswith("/") and not exec_binary.startswith("$"):
+                        is_relative = True
+                    
+                    # Check if binary is writable (if absolute path)
+                    elif exec_binary.startswith("/") and os.path.exists(exec_binary):
+                        try:
+                            if os.access(exec_binary, os.W_OK):
+                                can_write_binary = True
+                        except OSError:
+                            pass
 
-    if res["binary_missing"]:
-        suid_info["error"] = "find binary missing"
-        state["suid"] = suid_info
-        return
-    
-    # Check if find failed critically (syntax error), not just perm denied
-    # 'find' usually returns 0 even on perm denied, but >0 on syntax error.
-    if not res["ok"] and not res["stdout"]:
-        # If we got no hits AND an error code, record the stderr
-        suid_info["error"] = f"find command failed: {res['stderr'][:200]}"
-        state["suid"] = suid_info
-        return
+                unit_info = {
+                    "name": filename,
+                    "path": full_path,
+                    "exec_start": exec_binary,
+                    "writable_unit": can_write_unit,
+                    "writable_binary": can_write_binary,
+                    "is_relative_path": is_relative
+                }
 
-    entries = []
-    if res["stdout"]:
-        for line in res["stdout"].splitlines():
-            path = line.strip()
-            if not path:
-                continue
-            entries.append({"path": path})
+                systemd_data["units"].append(unit_info)
 
-    suid_info["found"] = entries
-    suid_info["method"] = "find_command"
-    state["suid"] = suid_info
+                # Fast access lists for the module
+                if can_write_unit:
+                    systemd_data["writable_units"].append(unit_info)
+                if can_write_binary:
+                    systemd_data["writable_binaries"].append(unit_info)
+                if is_relative:
+                    systemd_data["relative_paths"].append(unit_info)
+
+        except Exception as e:
+            systemd_data["error"] = str(e)
+
+    state["systemd"] = systemd_data
