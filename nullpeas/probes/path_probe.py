@@ -1,3 +1,8 @@
+"""
+nullpeas/probes/path_probe.py
+Enumerates PATH directories to find writable locations (Hijacking Surfaces).
+"""
+
 from typing import Dict, Any, List
 import os
 import stat
@@ -45,10 +50,7 @@ def _safe_get_group(gid: int) -> str:
 def run(state: Dict[str, Any]) -> None:
     """
     PATH probe.
-
-    Refactored for v2.0:
-    - Added explicit `os.access(W_OK)` check to correctly determine exploitability.
-    - Captures "can_i_write" flag for the analysis module.
+    - Captures "can_i_write" flag for the analysis module via os.access().
     """
     try:
         raw_path = os.environ.get("PATH") or ""
@@ -59,7 +61,6 @@ def run(state: Dict[str, Any]) -> None:
 
     world_writable_count = 0
     group_writable_count = 0
-    # user_writable refers to 'owner writable' in the loop below
     
     # Track how many paths *we* can actually hijack
     current_user_writable_count = 0
@@ -97,7 +98,7 @@ def run(state: Dict[str, Any]) -> None:
                     "owner_writable": False,
                     "group_writable": False,
                     "world_writable": False,
-                    "can_i_write": False, # Explicit check result
+                    "can_i_write": False, 
                     "in_home": False,
                     "in_tmpfs_like": False,
                     "error": str(e),
@@ -127,7 +128,6 @@ def run(state: Dict[str, Any]) -> None:
         in_tmpfs_like = any(_is_under_prefix(segment, prefix) for prefix in tmpfs_prefixes)
 
         # === CRITICAL HARDENING: Real Permission Check ===
-        # os.access(os.W_OK) correctly handles ACLs, Read-only filesystems, and group membership logic.
         can_i_write = os.access(segment, os.W_OK)
         if can_i_write:
             current_user_writable_count += 1
@@ -160,6 +160,6 @@ def run(state: Dict[str, Any]) -> None:
             "existing_entries": sum(1 for e in entries if e.get("exists")),
             "world_writable_count": world_writable_count,
             "group_writable_count": group_writable_count,
-            "current_user_writable_count": current_user_writable_count, # Renamed for clarity
+            "current_user_writable_count": current_user_writable_count,
         },
     }
