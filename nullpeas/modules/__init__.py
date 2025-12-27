@@ -1,101 +1,61 @@
-# nullpeas/modules/__init__.py
+from typing import List, Dict, Callable, Any
+from nullpeas.core.report import Report
 
-from typing import Callable, Dict, Any, List
-import pkgutil
-import importlib
-from pathlib import Path
-
-# Simple module record type:
-# {
-#   "key": "sudo_enum",
-#   "description": "...",
-#   "required_triggers": ["sudo_privesc_surface"],
-#   "run": <callable>
-# }
-_MODULE_REGISTRY: Dict[str, Dict[str, Any]] = {}
-_DISCOVERED = False
+# Registry list to hold module metadata and entrypoints
+_MODULE_REGISTRY = []
 
 
 def register_module(
-    key: str,
-    description: str,
-    required_triggers: List[str],
-) -> Callable:
+    key: str, description: str, required_triggers: List[str] = None
+):
     """
-    Decorator for modules to self-register.
+    Decorator to register a module.
+    
+    We use explicit registration rather than auto-discovery to ensure 
+    compatibility with Nuitka/PyInstaller compilation.
+    """
 
-    Usage in a module:
-        @register_module(
-            key="sudo_enum",
-            description="Analyse sudo -l and GTFOBins correlation",
-            required_triggers=["sudo_privesc_surface"],
+    def decorator(func: Callable[[Dict[str, Any], Report], None]):
+        _MODULE_REGISTRY.append(
+            {
+                "key": key,
+                "description": description,
+                "required_triggers": required_triggers or [],
+                "run": func,
+            }
         )
-        def run(state, report):
-            ...
-    """
-
-    def decorator(func: Callable):
-        _MODULE_REGISTRY[key] = {
-            "key": key,
-            "description": description,
-            "required_triggers": required_triggers,
-            "run": func,
-        }
         return func
 
     return decorator
 
 
-def _ensure_discovered():
+def get_available_modules(triggers: Dict[str, bool]) -> List[Dict[str, Any]]:
     """
-    Auto-import all Python modules in this package once,
-    so their @register_module decorators run and populate the registry.
-
-    We deliberately import *all* non-private modules (no leading underscore)
-    instead of relying on a naming convention like *_module.
+    Returns a list of modules that should run based on the current triggers.
     """
-    global _DISCOVERED
-    if _DISCOVERED:
-        return
-
-    package_name = __name__
-    package_path = Path(__file__).parent
-
-    for module_info in pkgutil.iter_modules([str(package_path)]):
-        name = module_info.name
-
-        # Skip private / dunder modules.
-        if name.startswith("_"):
+    available = []
+    for mod in _MODULE_REGISTRY:
+        reqs = mod["required_triggers"]
+        # If no requirements, it always runs (or could be manual-only).
+        if not reqs:
+            available.append(mod)
             continue
 
-        # We *do* want things like sudo_enum, docker_enum, cron_enum, etc.
-        importlib.import_module(f"{package_name}.{name}")
+        # Check if ALL required triggers are True
+        if all(triggers.get(r) for r in reqs):
+            available.append(mod)
 
-    _DISCOVERED = True
-
-
-def get_available_modules(triggers: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Return a list of module records that are applicable for the given triggers.
-    required_triggers is treated as "all must be True" in the trigger dict.
-    """
-    _ensure_discovered()
-
-    options: List[Dict[str, Any]] = []
-    for mod in _MODULE_REGISTRY.values():
-        reqs = mod.get("required_triggers") or []
-        if all(triggers.get(t, False) for t in reqs):
-            options.append(mod)
-
-    # Consistent order
-    options.sort(key=lambda m: m["key"])
-    return options
+    return available
 
 
-def list_all_modules() -> List[Dict[str, Any]]:
-    """
-    Return all known modules (regardless of triggers).
-    Useful for debugging or a future '--list-modules' CLI.
-    """
-    _ensure_discovered()
-    return sorted(_MODULE_REGISTRY.values(), key=lambda m: m["key"])
+# =============================================================================
+# EXPLICIT IMPORTS (WIRED IN)
+# =============================================================================
+# We must manually import modules here so the @register_module decorator runs.
+
+from . import sudo_enum
+from . import cron_enum
+from . import docker_enum
+from . import systemd_enum  # Systemd Persistence
+from . import suid_enum     # SUID GTFOBins
+# from . import path_enum   # (Future Module)
