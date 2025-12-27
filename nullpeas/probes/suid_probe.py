@@ -1,114 +1,79 @@
 """
-nullpeas/probes/systemd_probe.py
-Enumerates systemd service units to find writable configurations or binaries.
+nullpeas/probes/suid_probe.py
+Finds SUID (Set User ID) and SGID (Set Group ID) binaries on the filesystem.
 """
 
-from typing import Dict, Any, List
-import os
-import re
+import subprocess
+import shutil
+from typing import Dict, Any
 
-# Standard paths for systemd units
-UNIT_PATHS = [
-    "/etc/systemd/system",
-    "/lib/systemd/system",
-    "/usr/lib/systemd/system",
-    "/run/systemd/system",
+# Directories to ignore to prevent hanging, loops, or network drive scanning
+PRUNE_PATHS = [
+    "/proc", 
+    "/sys", 
+    "/dev", 
+    "/run", 
+    "/var/run", 
+    "/snap", 
+    "/var/lib/docker", 
+    "/var/lib/kubelet",
+    "/mnt",
+    "/media"
 ]
 
-def _parse_exec_start(content: str) -> str:
-    """
-    Simple regex to pull the binary path from ExecStart=...
-    Ignores arguments, flags, etc.
-    
-    Updated to handle systemd prefixes: -, @, !, +
-    """
-    # Look for ExecStart followed by optional prefixes [-@!+], then the path.
-    match = re.search(r'^ExecStart=[-@!+]*\s*([^\s]+)', content, re.MULTILINE)
-    if match:
-        return match.group(1)
-    return ""
-
 def run(state: Dict[str, Any]) -> None:
-    systemd_data: Dict[str, Any] = {
-        "units": [],
-        "writable_units": [],
-        "writable_binaries": [],
-        "relative_paths": [],
+    suid_data = {
+        "found": [],
         "error": None,
+        "method": "find_command"
     }
 
-    scanned_units = set()
+    # 1. Check if 'find' binary exists
+    if not shutil.which("find"):
+        suid_data["error"] = "'find' binary not found on target."
+        state["suid"] = suid_data
+        return
 
-    for base_dir in UNIT_PATHS:
-        if not os.path.isdir(base_dir):
-            continue
+    # 2. Build the command
+    # Logic: find / ( -path /proc -prune -o -path /sys -prune ... ) -o ( -type f -perm /6000 -print )
+    cmd = ["find", "/"]
 
-        try:
-            for filename in os.listdir(base_dir):
-                if not filename.endswith(".service"):
-                    continue
-                
-                full_path = os.path.join(base_dir, filename)
-                
-                # Deduplicate (same unit name might exist in multiple folders)
-                if filename in scanned_units:
-                    continue
-                scanned_units.add(filename)
+    # Add pruning arguments
+    for path in PRUNE_PATHS:
+        cmd.extend(["-path", path, "-prune", "-o"])
 
-                # 1. Check if Unit File is Writable
-                # We strictly check if WE can write to it.
-                try:
-                    can_write_unit = os.access(full_path, os.W_OK)
-                except OSError:
-                    can_write_unit = False
-                
-                # 2. Parse Content
-                try:
-                    with open(full_path, 'r', errors='ignore') as f:
-                        content = f.read()
-                except:
-                    continue
+    # Add permission check
+    # -perm -4000 = SUID
+    # -perm -2000 = SGID
+    # We use \( -perm -4000 -o -perm -2000 \) to catch either
+    cmd.extend([
+        "-type", "f",
+        "(", "-perm", "-4000", "-o", "-perm", "-2000", ")",
+        "-print"
+    ])
 
-                exec_binary = _parse_exec_start(content)
-                
-                # 3. Check Binary Permissions
-                can_write_binary = False
-                is_relative = False
-                
-                if exec_binary:
-                    # Check for relative path (no leading /)
-                    # Some paths might be valid systemd vars (e.g. ${...}), we skip those to avoid FPs
-                    if not exec_binary.startswith("/") and not exec_binary.startswith("$"):
-                        is_relative = True
-                    
-                    # Check if binary is writable (if absolute path)
-                    elif exec_binary.startswith("/") and os.path.exists(exec_binary):
-                        try:
-                            if os.access(exec_binary, os.W_OK):
-                                can_write_binary = True
-                        except OSError:
-                            pass
+    try:
+        # Run with a timeout to ensure we don't hang indefinitely on massive filesystems
+        # 15 seconds is usually enough for local disks; scanning network/slow disks is bad opsec anyway.
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=15
+        )
 
-                unit_info = {
-                    "name": filename,
-                    "path": full_path,
-                    "exec_start": exec_binary,
-                    "writable_unit": can_write_unit,
-                    "writable_binary": can_write_binary,
-                    "is_relative_path": is_relative
-                }
+        paths = result.stdout.strip().split('\n')
+        
+        # Parse output
+        for p in paths:
+            clean_p = p.strip()
+            if clean_p:
+                suid_data["found"].append({"path": clean_p})
 
-                systemd_data["units"].append(unit_info)
+    except subprocess.TimeoutExpired:
+        suid_data["error"] = "Scan timed out (filesystem too large or slow)."
+    except Exception as e:
+        suid_data["error"] = str(e)
 
-                # Fast access lists for the module
-                if can_write_unit:
-                    systemd_data["writable_units"].append(unit_info)
-                if can_write_binary:
-                    systemd_data["writable_binaries"].append(unit_info)
-                if is_relative:
-                    systemd_data["relative_paths"].append(unit_info)
-
-        except Exception as e:
-            systemd_data["error"] = str(e)
-
-    state["systemd"] = systemd_data
+    state["suid"] = suid_data
