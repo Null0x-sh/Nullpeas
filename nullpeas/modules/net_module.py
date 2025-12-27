@@ -1,11 +1,10 @@
 """
 nullpeas/modules/net_module.py
 Analyzes network state for pivot points, internal services, and lateral movement targets.
-v2.1:
-- Uses probe 'scope' tags (local vs wildcard).
-- Detects Localhost Exploitation targets (Redis, Docker, SQL).
-- Flags potential SSH Agent Hijacking opportunities.
-- Fix: Treats 'wildcard' (0.0.0.0) listeners as locally exploitable too.
+v2.2:
+- Semantic Primitives (network_docker_surface, etc.)
+- Realistic Confidence Scoring (Curve: 9.5 -> 5.0)
+- Improved Port Descriptions
 """
 
 from typing import Dict, Any, List
@@ -18,7 +17,7 @@ from nullpeas.core.offensive_schema import (
     new_primitive_id,
 )
 
-# Detailed descriptions for the "High Value" ports tagged by the probe
+# Detailed descriptions for the "High Value" ports
 PORT_DESCRIPTIONS = {
     # Remote Access
     22: "SSH (Potential Agent Hijacking)",
@@ -108,8 +107,7 @@ def run(state: Dict[str, Any], report: Report):
             lines.append("> No critical exploit services (Redis, Docker, SQL) found.")
         lines.append("")
 
-    # 2. Active Connections (Session Hijacking)
-    # Looking for INCOMING connections to port 22
+    # 2. Active Connections
     ssh_sessions = [c for c in connections if c["local_port"] == 22]
     
     if ssh_sessions:
@@ -118,14 +116,13 @@ def run(state: Dict[str, Any], report: Report):
             remote = s["remote_ip"]
             lines.append(f"- 👤 Established SSH from `{remote}`")
             
-            # Primitive: SSH Agent Hijacking Potential
             primitives.append(Primitive(
                 id=new_primitive_id("net", "active_session"),
                 surface="network",
-                type="info_disclosure",
+                type="network_remote_access_surface", # Semantic Type
                 run_as=origin_user,
                 origin_user=origin_user,
-                exploitability="theoretical", # Requires root or same user
+                exploitability="theoretical",
                 stability="risky",
                 noise="low",
                 confidence=PrimitiveConfidence(score=6.0, reason="Active SSH connection observed"),
@@ -140,7 +137,7 @@ def run(state: Dict[str, Any], report: Report):
             ))
         lines.append("")
 
-    # 3. Neighbors (Lateral Movement)
+    # 3. Neighbors
     if neighbors:
         lines.append(f"### 📡 Network Neighbors (ARP Cache)")
         lines.append(f"Found {len(neighbors)} neighbors. Potential targets for pivoting.")
@@ -157,40 +154,53 @@ def run(state: Dict[str, Any], report: Report):
 
 
 def _add_service_primitive(primitives, ip, port, desc, user, scope):
-    """Helper to create primitives for interesting ports"""
+    """Helper to create primitives for interesting ports with Semantic Types"""
     
-    # Base risk
+    # Default: Generic Service
+    primitive_type = "network_generic_surface"
     classification = "useful"
     exploitability = "moderate"
+    confidence_score = 5.0 # Baseline
     
-    # 1. Critical Local Exploits (Root Escalation)
-    # Fix: Allow 'wildcard' (0.0.0.0) as well as 'local'
     is_local_access = scope in ("local", "wildcard")
 
-    if port == 2375 and is_local_access: # Docker Unencrypted
-        classification = "catastrophic" # Direct Root
+    # 1. Critical Surfaces (Docker / Redis)
+    if port == 2375 and is_local_access:
+        primitive_type = "network_docker_surface"
+        classification = "catastrophic"
         exploitability = "trivial"
-        desc = "Docker Socket exposed on TCP (Root Escalation)"
+        desc = "Docker Socket exposed on TCP (Root Compromise)"
+        confidence_score = 9.5 # Almost certain win
         
-    elif port == 6379 and is_local_access: # Redis
+    elif port == 6379 and is_local_access:
+        primitive_type = "network_redis_surface"
         classification = "critical"
         exploitability = "trivial"
         desc = "Local Redis (Potential RCE via Cron/SSH)"
+        confidence_score = 8.0 # High, but requires specific config write permissions
 
-    # 2. High Value Pivots
+    # 2. Database Surfaces (SQL / Mongo)
     elif port in [5432, 3306, 27017]:
-        classification = "severe" # High value data / pivot
+        primitive_type = "network_db_surface"
+        classification = "severe" 
+        confidence_score = 6.5 # High value, but needs auth bypass or weak creds
+    
+    # 3. Remote Access Surfaces (SSH/RDP - usually for pivoting)
+    elif port in [22, 3389, 5900]:
+        primitive_type = "network_remote_access_surface"
+        classification = "useful"
+        confidence_score = 6.0
     
     primitives.append(Primitive(
         id=new_primitive_id("net", "local_service"),
         surface="network",
-        type="network_service",
+        type=primitive_type, # Semantic Type applied here
         run_as="unknown",
         origin_user=user,
         exploitability=exploitability, # type: ignore
         stability="safe",
         noise="low",
-        confidence=PrimitiveConfidence(score=9.0, reason=f"Port {port} confirmed listening ({scope})"),
+        confidence=PrimitiveConfidence(score=confidence_score, reason=f"Port {port} confirmed listening ({scope})"),
         offensive_value=OffensiveValue(
             classification=classification, # type: ignore
             why=f"{desc}"
