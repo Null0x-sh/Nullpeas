@@ -26,7 +26,7 @@ from nullpeas.probes.suid_probe import run as run_suid_probe
 from nullpeas.probes.systemd_probe import run as run_systemd_probe
 from nullpeas.probes.caps_probe import run as run_caps_probe
 from nullpeas.probes.loot_probe import run as run_loot_probe
-from nullpeas.probes.net_probe import run as run_net_probe   # <--- NEW IMPORT
+from nullpeas.probes.net_probe import run as run_net_probe 
 
 from nullpeas.modules import get_available_modules
 
@@ -59,7 +59,7 @@ def _run_all_probes_threaded() -> dict:
         ("systemd", run_systemd_probe),
         ("caps", run_caps_probe),
         ("loot", run_loot_probe),
-        ("net", run_net_probe),    # <--- NEW PROBE
+        ("net", run_net_probe),  
     ]
 
     with ThreadPoolExecutor(max_workers=len(probes)) as executor:
@@ -285,7 +285,7 @@ def _print_summary(state: dict):
         print(f"  Files found      : {len(loot.get('found', []))}")
     print()
 
-    print("=== Network ===") # <--- New Section
+    print("=== Network ===")
     if net.get("error"):
         print(f"  Error            : {net['error']}")
     else:
@@ -482,7 +482,7 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
 
     report.add_section("Offensive Attack Chains", lines)
 
-    # === NEW: Exploit Cheat Sheet (Report + STDOUT) ===
+    # ===: Exploit Cheat Sheet (Report + STDOUT) ===
     cheat_sheet_lines = []
     has_exploits = False
 
