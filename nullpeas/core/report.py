@@ -148,7 +148,7 @@ class Report:
     def _render_mermaid(self) -> List[str]:
         """
         Generates a visual graph of the attack chains using Mermaid.js syntax.
-        Updated in v2.0 to support SUID and Trap/Hijack visualization.
+        Updated in v2.0 to support SUID, Trap/Hijack, and Systemd Service visualization.
         """
         if not self.attack_chains:
             return []
@@ -164,10 +164,12 @@ class Report:
         lines.append("    classDef fileWrite fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;")
         # Persistence (Green)
         lines.append("    classDef persistence fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px;")
-        # SUID Binaries (Purple) - NEW
+        # SUID Binaries (Purple)
         lines.append("    classDef suid fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;")
-        # Traps / Path Hijacking (Orange) - NEW
+        # Traps / Path Hijacking (Orange)
         lines.append("    classDef trap fill:#ffe0b2,stroke:#e65100,stroke-width:2px;")
+        # Systemd / Services (Indigo) - NEW
+        lines.append("    classDef service fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px;")
 
         for idx, chain in enumerate(self.attack_chains, start=1):
             goal = chain.get("goal", "Goal")
@@ -203,6 +205,8 @@ class Report:
                     style_class = "suid"
                 elif "hijack" in desc_lower or "trap" in desc_lower or "interception" in desc_lower:
                     style_class = "trap"
+                elif "systemd" in desc_lower or "service" in desc_lower: # NEW
+                    style_class = "service"
                 
                 # Sanitize label (escape quotes if needed, limit length)
                 clean_desc = desc.replace('"', "'")
