@@ -3,17 +3,16 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Iterable
 import datetime
 import json
-from dataclasses import asdict, is_dataclass  # <--- FIX 1: Imports for crash fix
+from dataclasses import asdict, is_dataclass
 
 class Report:
     """
     Nullpeas unified reporting engine.
     
-    v2.1 Update: "Smart Rendering"
-    - Top 5 Chains -> Full Detail
-    - Remaining Chains -> Compact Table
-    - Prevents 2,000+ line reports when target is vulnerable.
-    - FIX: Auto-converts dataclasses to dicts to prevent AttributeErrors.
+    v2.2 Update: "Polished Rendering"
+    - Visual Map: Capped at Top 5 chains for readability.
+    - Table: Fixed ID truncation (shows unique hash).
+    - Mermaid: Increased label length for better context.
     """
 
     def __init__(
@@ -47,13 +46,11 @@ class Report:
         self.add_section(heading, lines)
 
     def add_primitive(self, primitive: Any):
-        # <--- FIX 1: Safety check to prevent AttributeError
         if is_dataclass(primitive): primitive = asdict(primitive)
         elif hasattr(primitive, "__dict__"): primitive = primitive.__dict__
         self.primitives.append(primitive)
 
     def add_attack_chain(self, chain: Any):
-        # <--- FIX 1: Safety check to prevent AttributeError
         if is_dataclass(chain): chain = asdict(chain)
         elif hasattr(chain, "__dict__"): chain = chain.__dict__
         self.attack_chains.append(chain)
@@ -93,8 +90,8 @@ class Report:
         lines.append("    classDef trap fill:#ffe0b2,stroke:#e65100,stroke-width:2px;")
         lines.append("    classDef service fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px;")
 
-        # Render Top 15 only to keep graph sane
-        for idx, chain in enumerate(self.attack_chains[:15], start=1):
+        # v2.2 FIX: Only render Top 5 chains to keep diagram clean
+        for idx, chain in enumerate(self.attack_chains[:5], start=1):
             goal = chain.get("goal", "Goal")
             lines.append(f"    subgraph C{idx} [Chain {idx}: {goal}]")
             lines.append(f"    direction TB")
@@ -113,7 +110,8 @@ class Report:
                 elif "hijack" in d_low or "trap" in d_low: style_class = "trap"
                 elif "systemd" in d_low or "service" in d_low: style_class = "service"
                 
-                label = desc.replace('"', "'")[:40]
+                # v2.2 FIX: Increased label length to 50 chars
+                label = desc.replace('"', "'")[:50]
                 lines.append(f"    {node_id}[\"{label}\"]:::{style_class}")
                 lines.append(f"    {previous_node} --> {node_id}")
                 previous_node = node_id
@@ -140,7 +138,7 @@ class Report:
         lines.append(f"**Total Chains Identified:** {len(sorted_chains)}")
         lines.append("")
 
-        # --- PART 1: TOP 5 FULL DETAIL (Fixes Bloat) ---
+        # --- PART 1: TOP 5 FULL DETAIL ---
         lines.append("### 🔥 Top Critical Chains")
         lines.append("Detailed analysis of the most dangerous paths found.")
         lines.append("")
@@ -150,17 +148,14 @@ class Report:
             lines.append(f"#### {idx}. {goal} ({c.get('classification')})")
             lines.append(f"- **Truth:** {c.get('offensive_truth', 'N/A')}")
             
-            # Safe access to nested dicts
             conf_score = c.get("confidence", {}).get("score", "?")
             lines.append(f"- **Confidence:** {conf_score}/10")
             
-            # Steps
             if c.get("steps"):
                 lines.append("**Attack Path:**")
                 for s in c["steps"]:
                     lines.append(f"1. `{s.get('primitive_id')}` -> {s.get('description')}")
             
-            # Exploit
             cmds = c.get("exploit_commands", [])
             if cmds:
                 lines.append("")
@@ -180,16 +175,18 @@ class Report:
             lines.append("|---|---|---|---|---|")
             
             for c in sorted_chains[5:]:
-                cid = c.get("chain_id", "")[:8]
+                # v2.2 FIX: Show unique hash suffix instead of truncated prefix
+                full_id = c.get("chain_id", "")
+                cid = full_id.split("_")[-1] if "_" in full_id else full_id[:8]
+                
                 goal = c.get("goal", "")
                 cls = c.get("classification", "")
                 exp = c.get("exploitability", "")
-                # Try to get the first primitive description
                 vec = "Unknown"
                 if c.get("steps"):
                     vec = c["steps"][0].get("description", "")[:50]
                 
-                lines.append(f"| `{cid}` | {goal} | {cls} | {exp} | {vec} |")
+                lines.append(f"| `...{cid}` | {goal} | {cls} | {exp} | {vec} |")
             
             lines.append("")
 
@@ -223,9 +220,9 @@ class Report:
         path = self.output_dir / filename
         content = []
         content.extend(self._render_header())
-        content.extend(self._render_mermaid()) # Visuals first
-        content.extend(self._render_attack_chains()) # Smart Chains second
-        content.extend(self._render_sections()) # Legacy text sections
+        content.extend(self._render_mermaid())
+        content.extend(self._render_attack_chains())
+        content.extend(self._render_sections())
         
         path.write_text("\n".join(content), encoding="utf-8")
         return path
