@@ -14,14 +14,25 @@ import uuid
 Exploitability = Literal["trivial", "moderate", "advanced", "theoretical"]
 Stability = Literal["safe", "moderate", "risky", "dangerous"]
 Noise = Literal["silent", "low", "noticeable", "loud"]
-Classification = Literal["catastrophic", "severe", "useful", "niche"]
 
+# FIX 1: Added 'critical' and 'high' to match module usage
+Classification = Literal[
+    "catastrophic", 
+    "critical", 
+    "severe", 
+    "high", 
+    "useful", 
+    "niche"
+]
+
+# FIX 2: Added 'reconnaissance' for low-priority intel chains
 Goal = Literal[
     "root_shell",
     "privilege_escalation",
     "persistence",
     "lateral_movement",
     "credential_access",
+    "reconnaissance",
 ]
 
 
@@ -44,7 +55,7 @@ class PrimitiveConfidence:
 class OffensiveValue:
     """
     How valuable this primitive is from an operator's perspective.
-    classification: catastrophic / severe / useful / niche
+    classification: catastrophic / critical / severe / high / useful / niche
     why:            short justification, shown in reports
     """
     classification: Classification
@@ -59,12 +70,12 @@ class Primitive:
 
     # Identity
     id: str
-    surface: str               # e.g. "sudo", "cron", "docker", "suid"
-    type: str                  # e.g. "root_shell_primitive", "arbitrary_file_write"
+    surface: str                # e.g. "sudo", "cron", "docker", "suid"
+    type: str                   # e.g. "root_shell_primitive", "arbitrary_file_write"
 
     # Who / how it runs
-    run_as: str                # effective user if used (normally "root")
-    origin_user: str           # the account we started from
+    run_as: str                 # effective user if used (normally "root")
+    origin_user: str            # the account we started from
 
     # Behavioural profile
     exploitability: Exploitability
@@ -84,8 +95,8 @@ class Primitive:
     affected_resource: Optional[str] = None
 
     # Extra context for chaining/reporting
-    context: Dict[str, Any] = field(default_factory=dict)       
-    conditions: Dict[str, Any] = field(default_factory=dict)    
+    context: Dict[str, Any] = field(default_factory=dict)        
+    conditions: Dict[str, Any] = field(default_factory=dict)     
     integration_flags: Dict[str, Any] = field(default_factory=dict)
 
     # Cross-references
