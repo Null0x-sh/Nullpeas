@@ -7,6 +7,7 @@ Refactored for v2.0:
 - Added TTY detection to support reverse shells (auto-run mode).
 - Added Exploit Cheat Sheet reporting logic (file + stdout).
 - Added SUID/SGID probe integration.
+- Added Systemd probe integration.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,6 +26,7 @@ from nullpeas.probes.cron_probe import run as run_cron_probe
 from nullpeas.probes.runtime_probe import run as run_runtime_probe
 from nullpeas.probes.path_probe import run as run_path_probe
 from nullpeas.probes.suid_probe import run as run_suid_probe
+from nullpeas.probes.systemd_probe import run as run_systemd_probe # <--- NEW
 
 from nullpeas.modules import get_available_modules
 
@@ -54,6 +56,7 @@ def _run_all_probes_threaded() -> dict:
         ("runtime", run_runtime_probe),
         ("path", run_path_probe),
         ("suid", run_suid_probe),
+        ("systemd", run_systemd_probe), # <--- NEW
     ]
 
     with ThreadPoolExecutor(max_workers=len(probes)) as executor:
@@ -90,6 +93,7 @@ def _build_triggers(state: dict):
     runtime = state.get("runtime", {}) or {}
     path = state.get("path", {}) or {}
     suid = state.get("suid", {}) or {}
+    systemd = state.get("systemd", {}) or {} # <--- NEW
 
     container = runtime.get("container", {}) or {}
     virt = runtime.get("virtualization", {}) or {}
@@ -116,6 +120,9 @@ def _build_triggers(state: dict):
     
     # SUID
     triggers["suid_files_present"] = bool(suid.get("found"))
+
+    # Systemd
+    triggers["systemd_files_present"] = bool(systemd.get("units")) # <--- NEW
 
     # Runtime and docker
     triggers["in_container"] = bool(container.get("in_container"))
@@ -198,6 +205,7 @@ def _print_summary(state: dict):
     cron = state.get("cron", {})
     runtime = state.get("runtime", {})
     suid = state.get("suid", {})
+    systemd = state.get("systemd", {}) # <--- NEW
 
     print("=== User ===")
     print(f"  Name : {user.get('name')}")
@@ -245,6 +253,16 @@ def _print_summary(state: dict):
         method = suid.get("method", "unknown")
         print(f"  Files found      : {found_count}")
         print(f"  Method           : {method}")
+    print()
+    
+    # === NEW: Systemd Summary ===
+    print("=== Systemd ===")
+    if systemd.get("error"):
+        print(f"  Error            : {systemd['error']}")
+    else:
+        print(f"  Units found      : {len(systemd.get('units', []))}")
+        print(f"  Writable units   : {len(systemd.get('writable_units', []))}")
+        print(f"  Writable binaries: {len(systemd.get('writable_binaries', []))}")
     print()
 
     print("=== Runtime ===")
@@ -308,6 +326,12 @@ def _print_suggestions(state: dict):
         suggestions.append(
             "[>] PATH hijack surfaces detected. Recommended: path_enum to analyse writable or user-controlled PATH segments."
         )
+        
+    # NEW
+    if triggers.get("systemd_files_present"):
+        suggestions.append(
+            "[>] Systemd present. Recommended: systemd_enum to analyse services for writable units or binaries."
+        )
 
     if not suggestions:
         suggestions.append(
@@ -329,7 +353,7 @@ def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
         return
 
     # Stable ordering: known surfaces first, then any others.
-    preferred_order = ["sudo", "docker", "cron", "path", "suid"]
+    preferred_order = ["sudo", "docker", "cron", "systemd", "path", "suid"] # <--- ADDED SYSTEMD
     ordered_keys: List[str] = []
 
     for k in preferred_order:
