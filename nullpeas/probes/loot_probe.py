@@ -2,10 +2,9 @@
 nullpeas/probes/loot_probe.py
 Enumerates sensitive files (Loot) in targeted high-probability directories.
 Optimized for speed: Does not scan the entire filesystem.
-v2.3 Improvements:
-- Tighter SSH key detection (avoids generic "key" substring matches).
-- Special handling for master.key (Rails) and passwd.
-- Categorizes 'passwd' explicitly as account_db.
+v2.4 Improvements:
+- Checks 'readable' status (os.access) for every file found.
+- Differentiates between "file exists" and "file is loot".
 """
 
 import subprocess
@@ -125,9 +124,9 @@ def run(state: Dict[str, Any]) -> None:
             name = os.path.basename(path)
             category = "unknown"
 
-            # 1. SSH & Keys (Tightened)
+            # 1. SSH & Keys
             if name == "master.key":
-                category = "web_config" # Rails master key -> Web/App Config
+                category = "web_config" 
             elif "ssh" in path or name.startswith("id_") or name.endswith(".key"):
                 category = "ssh_key"
             
@@ -152,11 +151,16 @@ def run(state: Dict[str, Any]) -> None:
             # 4. Generic Configs
             elif name in ["config.json", "settings.json"]:
                 category = "config_secret"
-                
+            
+            # === NEW: Check Readability ===
+            readable = os.access(path, os.R_OK)
+            # ==============================
+
             loot_data["found"].append({
                 "path": path,
                 "filename": name,
-                "category": category
+                "category": category,
+                "readable": readable, # <--- Stored here
             })
 
     state["loot"] = loot_data
