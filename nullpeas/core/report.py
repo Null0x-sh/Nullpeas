@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Iterable
 import datetime
 import json
-
+from dataclasses import asdict, is_dataclass  # <--- NEW IMPORTS
 
 class Report:
     """
@@ -87,8 +87,11 @@ class Report:
     def add_primitive(self, primitive: Any):
         """
         Accepts a Primitive dataclass OR dict.
+        We use asdict() to ensure nested objects (like PrimitiveConfidence) become dicts.
         """
-        if hasattr(primitive, "__dict__"):
+        if is_dataclass(primitive):
+            primitive = asdict(primitive)
+        elif hasattr(primitive, "__dict__"):
             primitive = primitive.__dict__
         self.primitives.append(primitive)
 
@@ -103,8 +106,11 @@ class Report:
     def add_attack_chain(self, chain: Any):
         """
         Accepts an AttackChain dataclass OR dict.
+        We use asdict() to ensure nested objects (like ChainConfidence) become dicts.
         """
-        if hasattr(chain, "__dict__"):
+        if is_dataclass(chain):
+            chain = asdict(chain)
+        elif hasattr(chain, "__dict__"):
             chain = chain.__dict__
         self.attack_chains.append(chain)
 
@@ -148,7 +154,6 @@ class Report:
     def _render_mermaid(self) -> List[str]:
         """
         Generates a visual graph of the attack chains using Mermaid.js syntax.
-        Updated in v2.0 to support SUID, Trap/Hijack, and Systemd Service visualization.
         """
         if not self.attack_chains:
             return []
@@ -156,22 +161,18 @@ class Report:
         lines = ["## Visual Attack Map", "", "```mermaid", "graph TD"]
         
         # === Style definitions ===
-        # Standard Primitive (Blue)
         lines.append("    classDef primitive fill:#e1f5fe,stroke:#01579b,stroke-width:2px;")
-        # Root Goal (Red)
         lines.append("    classDef rootGoal fill:#ffcdd2,stroke:#b71c1c,stroke-width:4px;")
-        # File Writes (Yellow)
         lines.append("    classDef fileWrite fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;")
-        # Persistence (Green)
         lines.append("    classDef persistence fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px;")
-        # SUID Binaries (Purple)
         lines.append("    classDef suid fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;")
-        # Traps / Path Hijacking (Orange)
         lines.append("    classDef trap fill:#ffe0b2,stroke:#e65100,stroke-width:2px;")
-        # Systemd / Services (Indigo) - NEW
         lines.append("    classDef service fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px;")
 
-        for idx, chain in enumerate(self.attack_chains, start=1):
+        # Only render top 15 chains to avoid graph explosion
+        chains_to_render = self.attack_chains[:15]
+
+        for idx, chain in enumerate(chains_to_render, start=1):
             goal = chain.get("goal", "Goal")
             
             # Create a subgraph for each chain
@@ -192,11 +193,6 @@ class Report:
                 style_class = "primitive"
                 desc_lower = desc.lower()
                 
-                if "root" in goal: 
-                    # If this is the FINAL step of a root chain, it might be the trigger
-                    if i == len(steps) - 1:
-                        pass # Keep logic below to decide specific type
-                        
                 if "write" in desc_lower or "modify" in desc_lower: 
                     style_class = "fileWrite"
                 elif "persistence" in desc_lower: 
@@ -205,10 +201,10 @@ class Report:
                     style_class = "suid"
                 elif "hijack" in desc_lower or "trap" in desc_lower or "interception" in desc_lower:
                     style_class = "trap"
-                elif "systemd" in desc_lower or "service" in desc_lower: # NEW
+                elif "systemd" in desc_lower or "service" in desc_lower: 
                     style_class = "service"
                 
-                # Sanitize label (escape quotes if needed, limit length)
+                # Sanitize label
                 clean_desc = desc.replace('"', "'")
                 label = f"{clean_desc[:40]}..." if len(clean_desc) > 40 else clean_desc
                 
@@ -333,6 +329,7 @@ class Report:
                 lines.append("")
 
             # Confidence
+            # This is where the fix applies. 'conf' is now guaranteed to be a dict.
             conf = c.get("confidence") or {}
             if conf:
                 score = conf.get("score")
