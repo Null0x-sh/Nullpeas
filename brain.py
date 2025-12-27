@@ -8,6 +8,7 @@ Refactored for v2.0:
 - Added Exploit Cheat Sheet reporting logic (file + stdout).
 - Added SUID/SGID probe integration.
 - Added Systemd probe integration.
+- FIXED: Mermaid Diagram population bug.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,7 +27,7 @@ from nullpeas.probes.cron_probe import run as run_cron_probe
 from nullpeas.probes.runtime_probe import run as run_runtime_probe
 from nullpeas.probes.path_probe import run as run_path_probe
 from nullpeas.probes.suid_probe import run as run_suid_probe
-from nullpeas.probes.systemd_probe import run as run_systemd_probe # <--- NEW
+from nullpeas.probes.systemd_probe import run as run_systemd_probe
 
 from nullpeas.modules import get_available_modules
 
@@ -56,7 +57,7 @@ def _run_all_probes_threaded() -> dict:
         ("runtime", run_runtime_probe),
         ("path", run_path_probe),
         ("suid", run_suid_probe),
-        ("systemd", run_systemd_probe), # <--- NEW
+        ("systemd", run_systemd_probe),
     ]
 
     with ThreadPoolExecutor(max_workers=len(probes)) as executor:
@@ -93,7 +94,7 @@ def _build_triggers(state: dict):
     runtime = state.get("runtime", {}) or {}
     path = state.get("path", {}) or {}
     suid = state.get("suid", {}) or {}
-    systemd = state.get("systemd", {}) or {} # <--- NEW
+    systemd = state.get("systemd", {}) or {}
 
     container = runtime.get("container", {}) or {}
     virt = runtime.get("virtualization", {}) or {}
@@ -122,7 +123,7 @@ def _build_triggers(state: dict):
     triggers["suid_files_present"] = bool(suid.get("found"))
 
     # Systemd
-    triggers["systemd_files_present"] = bool(systemd.get("units")) # <--- NEW
+    triggers["systemd_files_present"] = bool(systemd.get("units"))
 
     # Runtime and docker
     triggers["in_container"] = bool(container.get("in_container"))
@@ -205,7 +206,7 @@ def _print_summary(state: dict):
     cron = state.get("cron", {})
     runtime = state.get("runtime", {})
     suid = state.get("suid", {})
-    systemd = state.get("systemd", {}) # <--- NEW
+    systemd = state.get("systemd", {})
 
     print("=== User ===")
     print(f"  Name : {user.get('name')}")
@@ -255,7 +256,6 @@ def _print_summary(state: dict):
         print(f"  Method           : {method}")
     print()
     
-    # === NEW: Systemd Summary ===
     print("=== Systemd ===")
     if systemd.get("error"):
         print(f"  Error            : {systemd['error']}")
@@ -327,7 +327,6 @@ def _print_suggestions(state: dict):
             "[>] PATH hijack surfaces detected. Recommended: path_enum to analyse writable or user-controlled PATH segments."
         )
         
-    # NEW
     if triggers.get("systemd_files_present"):
         suggestions.append(
             "[>] Systemd present. Recommended: systemd_enum to analyse services for writable units or binaries."
@@ -353,7 +352,7 @@ def _append_analysis_sections_to_report(state: dict, report: Report) -> None:
         return
 
     # Stable ordering: known surfaces first, then any others.
-    preferred_order = ["sudo", "docker", "cron", "systemd", "path", "suid"] # <--- ADDED SYSTEMD
+    preferred_order = ["sudo", "docker", "cron", "systemd", "path", "suid"]
     ordered_keys: List[str] = []
 
     for k in preferred_order:
@@ -394,6 +393,10 @@ def _append_offensive_chains_to_report(state: dict, report: Report) -> None:
         return
 
     chains = build_attack_chains(primitives)
+    
+    # === FIX: Pass chains to Report for Mermaid Visualization ===
+    report.add_attack_chains(chains)
+    # ============================================================
 
     if not chains:
         report.add_section(
