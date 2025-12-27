@@ -51,9 +51,12 @@ def get_available_modules(triggers: Dict[str, bool]) -> List[Dict[str, Any]]:
 # =============================================================================
 # EXPLICIT IMPORTS (WIRED IN)
 # =============================================================================
+# We must manually import modules here so the @register_module decorator runs.
+
 from . import sudo_enum_module
 from . import cron_enum_module
 from . import docker_enum
 from . import systemd_module
 from . import suid_module
 from . import path_enum_module
+from . import caps_module
